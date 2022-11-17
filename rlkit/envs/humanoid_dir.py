@@ -1,5 +1,5 @@
 import numpy as np
-from gym.envs.mujoco import HumanoidEnv as HumanoidEnv
+from gymnasium.envs.mujoco import HumanoidEnv as HumanoidEnv
 
 from . import register_env
 
@@ -31,12 +31,13 @@ class HumanoidDirEnv(HumanoidEnv):
         quad_impact_cost = min(quad_impact_cost, 10)
         reward = lin_vel_cost - quad_ctrl_cost - quad_impact_cost + alive_bonus
         qpos = self.sim.data.qpos
-        done = bool((qpos[2] < 1.0) or (qpos[2] > 2.0))
+        terminated = bool((qpos[2] < 1.0) or (qpos[2] > 2.0))
+        truncated = False
 
-        return self._get_obs(), reward, done, dict(reward_linvel=lin_vel_cost,
-                                                   reward_quadctrl=-quad_ctrl_cost,
-                                                   reward_alive=alive_bonus,
-                                                   reward_impact=-quad_impact_cost)
+        return self._get_obs(), reward, terminated, truncated, dict(reward_linvel=lin_vel_cost,
+                                                                    reward_quadctrl=-quad_ctrl_cost,
+                                                                    reward_alive=alive_bonus,
+                                                                    reward_impact=-quad_impact_cost)
 
     def _get_obs(self):
         data = self.sim.data

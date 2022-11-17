@@ -1,7 +1,7 @@
 import numpy as np
 
 from rlkit.data_management.simple_replay_buffer import SimpleReplayBuffer
-from gym.spaces import Box, Discrete, Tuple
+from gymnasium.spaces import Box, Discrete, Tuple
 
 
 class MultiTaskReplayBuffer(object):

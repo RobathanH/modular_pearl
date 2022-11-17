@@ -22,9 +22,10 @@ class AntGoalEnv(MultitaskAntEnv):
         survive_reward = 0.0
         reward = goal_reward - ctrl_cost - contact_cost + survive_reward
         state = self.state_vector()
-        done = False
+        terminated = False
+        truncated = False
         ob = self._get_obs()
-        return ob, reward, done, dict(
+        return ob, reward, terminated, truncated, dict(
             goal_forward=goal_reward,
             reward_ctrl=-ctrl_cost,
             reward_contact=-contact_cost,

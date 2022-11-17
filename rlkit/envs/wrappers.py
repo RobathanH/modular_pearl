@@ -1,6 +1,6 @@
 import numpy as np
-from gym import Env
-from gym.spaces import Box
+from gymnasium import Env
+from gymnasium.spaces import Box
 import mujoco_py
 
 from rlkit.core.serializable import Serializable
@@ -110,10 +110,10 @@ class NormalizedBoxEnv(ProxyEnv, Serializable):
         scaled_action = np.clip(scaled_action, lb, ub)
 
         wrapped_step = self._wrapped_env.step(scaled_action)
-        next_obs, reward, done, info = wrapped_step
+        next_obs, reward, terminated, truncated, info = wrapped_step
         if self._should_normalize:
             next_obs = self._apply_normalize_obs(next_obs)
-        return next_obs, reward * self._reward_scale, done, info
+        return next_obs, reward * self._reward_scale, terminated, truncated, info
 
     def __str__(self):
         return "Normalized: %s" % self._wrapped_env

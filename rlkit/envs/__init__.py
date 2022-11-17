@@ -23,4 +23,9 @@ def register_env(name):
 for file in os.listdir(os.path.dirname(__file__)):
     if file.endswith('.py') and not file.startswith('_'):
         module = file[:file.find('.py')]
+        
+        # Skip rand_params envs which haven't been updated yet
+        if "rand_params" in module:
+            continue
+        
         importlib.import_module('rlkit.envs.' + module)

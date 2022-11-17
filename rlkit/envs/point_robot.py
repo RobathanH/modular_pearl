@@ -1,6 +1,6 @@
 import numpy as np
-from gym import spaces
-from gym import Env
+from gymnasium import spaces
+from gymnasium import Env
 
 from . import register_env
 
@@ -53,7 +53,7 @@ class PointEnv(Env):
         return self._get_obs()
 
     def reset(self):
-        return self.reset_model()
+        return self.reset_model(), {}
 
     def _get_obs(self):
         return np.copy(self._state)
@@ -64,9 +64,10 @@ class PointEnv(Env):
         x -= self._goal[0]
         y -= self._goal[1]
         reward = - (x ** 2 + y ** 2) ** 0.5
-        done = False
+        terminated = False
+        truncated = False
         ob = self._get_obs()
-        return ob, reward, done, dict()
+        return ob, reward, terminated, truncated, dict()
 
     def viewer_setup(self):
         print('no viewer')
@@ -113,10 +114,10 @@ class SparsePointEnv(PointEnv):
         return self._get_obs()
 
     def step(self, action):
-        ob, reward, done, d = super().step(action)
+        ob, reward, terminated, truncated, d = super().step(action)
         sparse_reward = self.sparsify_rewards(reward)
         # make sparse rewards positive
         if reward >= -self.goal_radius:
             sparse_reward += 1
         d.update({'sparse_reward': sparse_reward})
-        return ob, reward, done, d
+        return ob, reward, terminated, truncated, d
