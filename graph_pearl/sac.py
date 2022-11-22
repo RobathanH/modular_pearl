@@ -1,23 +1,37 @@
 from collections import OrderedDict
 import numpy as np
+import gtimer as gt
 
 import torch
 import torch.optim as optim
 from torch import nn as nn
+import torch.nn.functional as F
+import torch_geometric as gtorch
 
 import rlkit.torch.pytorch_util as ptu
 from rlkit.core.eval_util import create_stats_ordered_dict
 from rlkit.core.rl_algorithm import MetaRLAlgorithm
 
+from .graph_utils import construct_graph
 
-class PEARLSoftActorCritic(MetaRLAlgorithm):
+
+class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
     def __init__(
             self,
             env,
             train_tasks,
             eval_tasks,
             latent_dim,
-            nets,
+            agent,
+
+            inner_node_count=3,
+            inner_edge_types=2,
+            inner_dim=200,
+            graph_conv_iterations=4,
+            context_graph_lr=1e-3,
+            sim_anneal_temp=1e-4,
+            sim_anneal_proposals=10,
+            bouncegrad_iterations=10,
 
             policy_lr=1e-3,
             qf_lr=1e-3,
@@ -40,11 +54,16 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
     ):
         super().__init__(
             env=env,
-            agent=nets[0],
+            agent=agent,
             train_tasks=train_tasks,
             eval_tasks=eval_tasks,
             **kwargs
         )
+        
+        self.inner_node_count = inner_node_count
+        self.inner_edge_types = inner_edge_types
+        self.inner_dim = inner_dim
+        self.bouncegrad_iterations = bouncegrad_iterations
 
         self.soft_target_tau = soft_target_tau
         self.policy_mean_reg_weight = policy_mean_reg_weight
@@ -65,7 +84,7 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
         self.sparse_rewards = sparse_rewards
         self.use_next_obs_in_context = use_next_obs_in_context
 
-        self.qf1, self.qf2, self.vf = nets[1:]
+        self.qf1, self.qf2, self.vf = agent.qf1, agent.qf2, agent.vf
         self.target_vf = self.vf.copy()
 
         self.policy_optimizer = optimizer_class(
@@ -84,15 +103,19 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
             self.vf.parameters(),
             lr=vf_lr,
         )
-        self.context_optimizer = optimizer_class(
-            self.agent.context_encoder.parameters(),
+        self.context_vector_optimizer = optimizer_class(
+            self.agent.context_vector_encoder.parameters(),
             lr=context_lr,
+        )
+        self.context_graph_optimizer = optimizer_class(
+            self.agent.context_graph_encoder.parameters(),
+            lr=context_graph_lr
         )
 
     ###### Torch stuff #####
     @property
     def networks(self):
-        return self.agent.networks + [self.agent] + [self.qf1, self.qf2, self.vf, self.target_vf]
+        return [self.agent] + self.agent.networks + [self.target_vf]
 
     def training_mode(self, mode):
         for net in self.networks:
@@ -138,14 +161,11 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
         # group like elements together
         context = [[x[i] for x in context] for i in range(len(context[0]))]
         context = [torch.cat(x, dim=0) for x in context]
-        # full context consists of [obs, act, rewards, next_obs, terms]
-        # if dynamics don't change across tasks, don't include next_obs
-        # don't include terminals in context
-        if self.use_next_obs_in_context:
-            context = torch.cat(context[:-1], dim=2)
-        else:
-            context = torch.cat(context[:-2], dim=2)
-        return context
+
+        # Include individual context parts separately for simulated annealing step
+        obs, act, rewards, next_obs, terms = context
+            
+        return obs, act, rewards, next_obs, terms
 
     ##### Training #####
     def _do_training(self, indices):
@@ -160,15 +180,20 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
 
         # do this in a loop so we can truncate backprop in the recurrent encoder
         for i in range(num_updates):
-            context = context_batch[:, i * mb_size: i * mb_size + mb_size, :]
+            context = tuple(
+                context_component[:, i * mb_size: i * mb_size + mb_size, :]
+                for context_component in context_batch
+            )
             self._take_step(indices, context)
 
             # stop backprop
             self.agent.detach_z()
 
-    def _min_q(self, obs, actions, task_z):
-        q1 = self.qf1(obs, actions, task_z.detach())
-        q2 = self.qf2(obs, actions, task_z.detach())
+    def _min_q(self, obs, actions, latent, graph_structure):
+        state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                             graph_structure, obs, latent.detach(), action=actions)
+        q1 = self.qf1(state_action_input)
+        q2 = self.qf2(state_action_input)
         min_q = torch.min(q1, q2)
         return min_q
 
@@ -176,83 +201,96 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
         ptu.soft_update_from_to(self.vf, self.target_vf, self.soft_target_tau)
 
     def _take_step(self, indices, context):
-
         num_tasks = len(indices)
 
-        # data is (task, batch, feat)
+        # data is (task, batch, feat) (and is not flattened later)
         obs, actions, rewards, next_obs, terms = self.sample_sac(indices)
+        
+        for bouncegrad_it in range(self.bouncegrad_iterations):
+            
+            # run inference in networks
+            # Don't update graph structure in later iterations, instead we'll manually anneal
+            policy_outputs = self.agent(obs, context, update_graph_structure=(bouncegrad_it == 0))
+            new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
+            latent = self.agent.z.unsqueeze(1).expand(-1, obs.size(1), -1)
+            graph_structure = self.agent.graph_structure
 
-        # run inference in networks
-        policy_outputs, task_z = self.agent(obs, context)
-        new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
+            # Q and V networks
+            # encoder will only get gradients from Q nets (through state_action_input)
+            state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                                graph_structure, obs, latent, action=actions)
+            q1_pred = self.qf1(state_action_input)
+            q2_pred = self.qf2(state_action_input)
+            state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                        graph_structure, obs, latent.detach())
+            v_pred = self.vf(state_input)
+            # get targets for use in V and Q updates
+            with torch.no_grad():
+                next_state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                            graph_structure, next_obs, latent)
+                target_v_values = self.target_vf(next_state_input)
 
-        # flattens out the task dimension
-        t, b, _ = obs.size()
-        obs = obs.view(t * b, -1)
-        actions = actions.view(t * b, -1)
-        next_obs = next_obs.view(t * b, -1)
+            # KL constraint on z if probabilistic
+            self.context_vector_optimizer.zero_grad()
+            if self.use_information_bottleneck:
+                kl_div = self.agent.compute_kl_div()
+                kl_loss = self.kl_lambda * kl_div
+                kl_loss.backward(retain_graph=True)
 
-        # Q and V networks
-        # encoder will only get gradients from Q nets
-        q1_pred = self.qf1(obs, actions, task_z)
-        q2_pred = self.qf2(obs, actions, task_z)
-        v_pred = self.vf(obs, task_z.detach())
-        # get targets for use in V and Q updates
-        with torch.no_grad():
-            target_v_values = self.target_vf(next_obs, task_z)
+            # qf and encoder update (note encoder does not get grads from policy or vf)
+            self.qf1_optimizer.zero_grad()
+            self.qf2_optimizer.zero_grad()
+            # scale rewards for Bellman update
+            q_target = rewards * self.reward_scale + (1. - terms) * self.discount * target_v_values
+            qf_loss = torch.mean((q1_pred - q_target) ** 2) + torch.mean((q2_pred - q_target) ** 2)
+            qf_loss.backward()
+            self.qf1_optimizer.step()
+            self.qf2_optimizer.step()
+            self.context_vector_optimizer.step()
+            
+            # Update context graph encoder to match results from sim annealing
+            self.context_graph_optimizer.zero_grad()
+            #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types + 1) * self.agent.graph_structure_probs.log())
+            context_graph_loss = F.cross_entropy((self.agent.graph_structure_probs + 1e-9).flatten(0, -2).log(), self.agent.graph_structure.flatten())
+            context_graph_loss.backward()
+            self.context_graph_optimizer.step()
 
-        # KL constraint on z if probabilistic
-        self.context_optimizer.zero_grad()
-        if self.use_information_bottleneck:
-            kl_div = self.agent.compute_kl_div()
-            kl_loss = self.kl_lambda * kl_div
-            kl_loss.backward(retain_graph=True)
+            # compute min Q on the new actions
+            min_q_new_actions = self._min_q(obs, new_actions, latent, graph_structure)
 
-        # qf and encoder update (note encoder does not get grads from policy or vf)
-        self.qf1_optimizer.zero_grad()
-        self.qf2_optimizer.zero_grad()
-        rewards_flat = rewards.view(self.batch_size * num_tasks, -1)
-        # scale rewards for Bellman update
-        rewards_flat = rewards_flat * self.reward_scale
-        terms_flat = terms.view(self.batch_size * num_tasks, -1)
-        q_target = rewards_flat + (1. - terms_flat) * self.discount * target_v_values
-        qf_loss = torch.mean((q1_pred - q_target) ** 2) + torch.mean((q2_pred - q_target) ** 2)
-        qf_loss.backward()
-        self.qf1_optimizer.step()
-        self.qf2_optimizer.step()
-        self.context_optimizer.step()
+            # vf update
+            v_target = min_q_new_actions - log_pi
+            vf_loss = self.vf_criterion(v_pred, v_target.detach())
+            self.vf_optimizer.zero_grad()
+            vf_loss.backward()
+            self.vf_optimizer.step()
+            self._update_target_network()
 
-        # compute min Q on the new actions
-        min_q_new_actions = self._min_q(obs, new_actions, task_z)
+            # policy update
+            # n.b. policy update includes dQ/da
+            log_policy_target = min_q_new_actions
 
-        # vf update
-        v_target = min_q_new_actions - log_pi
-        vf_loss = self.vf_criterion(v_pred, v_target.detach())
-        self.vf_optimizer.zero_grad()
-        vf_loss.backward()
-        self.vf_optimizer.step()
-        self._update_target_network()
+            policy_loss = (
+                    log_pi - log_policy_target
+            ).mean()
 
-        # policy update
-        # n.b. policy update includes dQ/da
-        log_policy_target = min_q_new_actions
+            mean_reg_loss = self.policy_mean_reg_weight * (policy_mean**2).mean()
+            std_reg_loss = self.policy_std_reg_weight * (policy_log_std**2).mean()
+            pre_tanh_value = policy_outputs[-1]
+            pre_activation_reg_loss = self.policy_pre_activation_weight * (
+                (pre_tanh_value**2).sum(dim=2).mean()
+            )
+            policy_reg_loss = mean_reg_loss + std_reg_loss + pre_activation_reg_loss
+            policy_loss = policy_loss + policy_reg_loss
 
-        policy_loss = (
-                log_pi - log_policy_target
-        ).mean()
-
-        mean_reg_loss = self.policy_mean_reg_weight * (policy_mean**2).mean()
-        std_reg_loss = self.policy_std_reg_weight * (policy_log_std**2).mean()
-        pre_tanh_value = policy_outputs[-1]
-        pre_activation_reg_loss = self.policy_pre_activation_weight * (
-            (pre_tanh_value**2).sum(dim=1).mean()
-        )
-        policy_reg_loss = mean_reg_loss + std_reg_loss + pre_activation_reg_loss
-        policy_loss = policy_loss + policy_reg_loss
-
-        self.policy_optimizer.zero_grad()
-        policy_loss.backward()
-        self.policy_optimizer.step()
+            self.policy_optimizer.zero_grad()
+            policy_loss.backward()
+            self.policy_optimizer.step()
+            
+            # Simulated annealing on graph structure
+            self.agent.anneal_graph_structure(context)
+            
+            
 
         # save some statistics for eval
         if self.eval_statistics is None:
@@ -301,6 +339,7 @@ class PEARLSoftActorCritic(MetaRLAlgorithm):
             policy=self.agent.policy.state_dict(),
             vf=self.vf.state_dict(),
             target_vf=self.target_vf.state_dict(),
-            context_encoder=self.agent.context_encoder.state_dict(),
+            context_vector_encoder=self.agent.context_vector_encoder.state_dict(),
+            context_graph_encoder=self.agent.context_graph_encoder.state_dict(),
         )
         return snapshot

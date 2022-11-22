@@ -1,27 +1,30 @@
 import numpy as np
 import torch
 from torch import nn as nn
+import torch_geometric as gtorch
 
 from rlkit.core.util import Wrapper
 from rlkit.policies.base import ExplorationPolicy, Policy
 from rlkit.torch.distributions import TanhNormal
-from rlkit.torch.networks import Mlp
+from rlkit.torch.core import PyTorchModule
 from rlkit.torch.core import np_ify
 
+from .graph_utils import Node
+from .graph_modules import GraphTransformer
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
 
 
-class TanhGaussianPolicy(Mlp, ExplorationPolicy):
+class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
     """
     Usage:
 
     ```
     policy = TanhGaussianPolicy(...)
-    action, mean, log_std, _ = policy(obs)
-    action, mean, log_std, _ = policy(obs, deterministic=True)
-    action, mean, log_std, log_prob = policy(obs, return_log_prob=True)
+    action, mean, log_std, _ = policy(obs, z)
+    action, mean, log_std, _ = policy(obs, z, deterministic=True)
+    action, mean, log_std, log_prob = policy(obs, z, return_log_prob=True)
     ```
     Here, mean and log_std are the mean and log_std of the Gaussian that is
     sampled from.
@@ -33,68 +36,58 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
 
     def __init__(
             self,
-            hidden_sizes,
-            obs_dim,
-            latent_dim,
-            action_dim,
-            std=None,
-            init_w=1e-3,
-            **kwargs
+            inner_node_dim: int,
+            inner_node_edges: int,
+            conv_iterations: int,
+            state_dim: int,
+            latent_dim: int,
+            action_dim: int
     ):
         self.save_init_params(locals())
-        super().__init__(
-            hidden_sizes,
-            input_size=obs_dim,
-            output_size=action_dim,
-            init_w=init_w,
-            **kwargs
-        )
+        super().__init__()
+        
+        self.inner_node_dim = inner_node_dim
+        self.inner_node_edges = inner_node_edges
+        self.conv_iterations = conv_iterations
+        self.state_dim = state_dim
         self.latent_dim = latent_dim
-        self.log_std = None
-        self.std = std
-        if std is None:
-            last_hidden_size = obs_dim
-            if len(hidden_sizes) > 0:
-                last_hidden_size = hidden_sizes[-1]
-            self.last_fc_log_std = nn.Linear(last_hidden_size, action_dim)
-            self.last_fc_log_std.weight.data.uniform_(-init_w, init_w)
-            self.last_fc_log_std.bias.data.uniform_(-init_w, init_w)
-        else:
-            self.log_std = np.log(std)
-            assert LOG_SIG_MIN <= self.log_std <= LOG_SIG_MAX
+        self.action_dim = action_dim
+        
+        self.module = GraphTransformer(
+            {
+                Node.STATE_IN: state_dim,
+                Node.LATENT_IN: latent_dim
+            },
+            inner_node_dim,
+            inner_node_edges,
+            2 * action_dim,
+            conv_iterations
+        )
 
-    def get_action(self, obs, deterministic=False):
-        actions = self.get_actions(obs, deterministic=deterministic)
+    def get_action(self, graph: gtorch.data.HeteroData, deterministic: bool = False):
+        actions = self.get_actions(graph, deterministic=deterministic)
         return actions[0, :], {}
 
     @torch.no_grad()
-    def get_actions(self, obs, deterministic=False):
-        outputs = self.forward(obs, deterministic=deterministic)[0]
+    def get_actions(self, graph: gtorch.data.HeteroData, deterministic: bool = False):
+        outputs = self.forward(graph, deterministic=deterministic)[0]
         return np_ify(outputs)
 
     def forward(
             self,
-            obs,
-            reparameterize=False,
-            deterministic=False,
-            return_log_prob=False,
+            graph: gtorch.data.HeteroData,
+            reparameterize: bool = False,
+            deterministic: bool = False,
+            return_log_prob: bool = False,
     ):
         """
         :param obs: Observation
         :param deterministic: If True, do not sample
         :param return_log_prob: If True, return a sample and its log probability
         """
-        h = obs
-        for i, fc in enumerate(self.fcs):
-            h = self.hidden_activation(fc(h))
-        mean = self.last_fc(h)
-        if self.std is None:
-            log_std = self.last_fc_log_std(h)
-            log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
-            std = torch.exp(log_std)
-        else:
-            std = self.std
-            log_std = self.log_std
+        mean, log_std = torch.tensor_split(self.module(graph), 2, dim=-1)
+        log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
+        std = torch.exp(log_std)
 
         log_prob = None
         expected_log_prob = None
@@ -117,7 +110,7 @@ class TanhGaussianPolicy(Mlp, ExplorationPolicy):
                     action,
                     pre_tanh_value=pre_tanh_value
                 )
-                log_prob = log_prob.sum(dim=1, keepdim=True)
+                log_prob = log_prob.sum(dim=-1, keepdim=True)
             else:
                 if reparameterize:
                     action = tanh_normal.rsample()

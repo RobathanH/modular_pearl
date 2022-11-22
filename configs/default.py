@@ -1,6 +1,7 @@
 # default PEARL experiment settings
 # all experiments should modify these settings only as needed
 default_config = dict(
+    graph_pearl=False,
     env_name='cheetah-dir',
     n_train_tasks=2,
     n_eval_tasks=2,
@@ -12,6 +13,15 @@ default_config = dict(
         randomize_tasks=True, # shuffle the tasks after creating them
     ),
     algo_params=dict(
+        inner_node_count=3,
+        inner_edge_types=2,
+        inner_dim=200,
+        sim_anneal_temp=1E-4,
+        sim_anneal_proposals=10,
+        bouncegrad_iterations=10,
+        context_graph_lr=3E-4,
+        graph_conv_iterations=4,
+        
         meta_batch=16, # number of tasks to average the gradient across
         num_iterations=500, # number of data sampling / training iterates
         num_initial_steps=2000, # number of transitions collected per task before training

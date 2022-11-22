@@ -30,64 +30,165 @@ def experiment(variant):
     reward_dim = 1
 
     # instantiate networks
-    latent_dim = variant['latent_size']
-    context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
-    context_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
-    net_size = variant['net_size']
-    recurrent = variant['algo_params']['recurrent']
-    encoder_model = RecurrentEncoder if recurrent else MlpEncoder
+    if variant['graph_pearl']:
+        from graph_pearl import Node, GraphTransformer, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
+        
+        inner_node_count = variant['algo_params']['inner_node_count']
+        inner_edge_types = variant['algo_params']['inner_edge_types']
+        inner_dim = variant['algo_params']['inner_dim']
+        graph_conv_iterations = variant['algo_params']['graph_conv_iterations']
+        
+        latent_dim = variant['latent_size']
+        context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
+        context_vector_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
+        net_size = variant['net_size']
+        recurrent = variant['algo_params']['recurrent']
+        encoder_model = RecurrentEncoder if recurrent else MlpEncoder
+        
+        context_vector_encoder = encoder_model(
+            hidden_sizes=[200, 200, 200],
+            input_size=context_encoder_input_dim,
+            output_size=context_vector_encoder_output_dim
+        )
+        context_graph_encoder = encoder_model(
+            hidden_sizes=[200, 200, 200],
+            input_size=context_encoder_input_dim,
+            output_size=(inner_node_count**2) * (inner_edge_types + 1)
+        )
+        qf1 = GraphTransformer(
+            {
+                Node.LATENT_IN: latent_dim,
+                Node.STATE_IN: obs_dim,
+                Node.ACTION_IN: action_dim
+            },
+            inner_dim,
+            inner_edge_types,
+            1,
+            graph_conv_iterations
+        )
+        qf2 = GraphTransformer(
+            {
+                Node.LATENT_IN: latent_dim,
+                Node.STATE_IN: obs_dim,
+                Node.ACTION_IN: action_dim
+            },
+            inner_dim,
+            inner_edge_types,
+            1,
+            graph_conv_iterations
+        )
+        vf = GraphTransformer(
+            {
+                Node.LATENT_IN: latent_dim,
+                Node.STATE_IN: obs_dim
+            },
+            inner_dim,
+            inner_edge_types,
+            1,
+            graph_conv_iterations
+        )
+        policy = Graph_TanhGaussianPolicy(
+            inner_dim,
+            inner_edge_types,
+            graph_conv_iterations,
+            obs_dim,
+            latent_dim,
+            action_dim
+        )
+        agent = Graph_PEARLAgent(
+            latent_dim,
+            context_vector_encoder,
+            context_graph_encoder,
+            policy,
+            qf1,
+            qf2,
+            vf,
+            **variant['algo_params']
+        )
+        algorithm = Graph_PEARLSoftActorCritic(
+            env=env,
+            train_tasks=list(tasks[:variant['n_train_tasks']]),
+            eval_tasks=list(tasks[-variant['n_eval_tasks']:]),
+            agent=agent,
+            latent_dim=latent_dim,
+            **variant['algo_params']
+        )
+        
+        # optionally load pre-trained weights
+        if variant['path_to_weights'] is not None:
+            path = variant['path_to_weights']
+            context_vector_encoder.load_state_dict(torch.load(os.path.join(path, 'context_vector_encoder.pth')))
+            context_graph_encoder.load_state_dict(torch.load(os.path.join(path, 'context_graph_encoder.pth')))
+            qf1.load_state_dict(torch.load(os.path.join(path, 'qf1.pth')))
+            qf2.load_state_dict(torch.load(os.path.join(path, 'qf2.pth')))
+            vf.load_state_dict(torch.load(os.path.join(path, 'vf.pth')))
+            # TODO hacky, revisit after model refactor
+            algorithm.networks[-2].load_state_dict(torch.load(os.path.join(path, 'target_vf.pth')))
+            policy.load_state_dict(torch.load(os.path.join(path, 'policy.pth')))
+        
+    
+    
+    else:
+        latent_dim = variant['latent_size']
+        context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
+        context_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
+        net_size = variant['net_size']
+        recurrent = variant['algo_params']['recurrent']
+        encoder_model = RecurrentEncoder if recurrent else MlpEncoder
 
-    context_encoder = encoder_model(
-        hidden_sizes=[200, 200, 200],
-        input_size=context_encoder_input_dim,
-        output_size=context_encoder_output_dim,
-    )
-    qf1 = FlattenMlp(
-        hidden_sizes=[net_size, net_size, net_size],
-        input_size=obs_dim + action_dim + latent_dim,
-        output_size=1,
-    )
-    qf2 = FlattenMlp(
-        hidden_sizes=[net_size, net_size, net_size],
-        input_size=obs_dim + action_dim + latent_dim,
-        output_size=1,
-    )
-    vf = FlattenMlp(
-        hidden_sizes=[net_size, net_size, net_size],
-        input_size=obs_dim + latent_dim,
-        output_size=1,
-    )
-    policy = TanhGaussianPolicy(
-        hidden_sizes=[net_size, net_size, net_size],
-        obs_dim=obs_dim + latent_dim,
-        latent_dim=latent_dim,
-        action_dim=action_dim,
-    )
-    agent = PEARLAgent(
-        latent_dim,
-        context_encoder,
-        policy,
-        **variant['algo_params']
-    )
-    algorithm = PEARLSoftActorCritic(
-        env=env,
-        train_tasks=list(tasks[:variant['n_train_tasks']]),
-        eval_tasks=list(tasks[-variant['n_eval_tasks']:]),
-        nets=[agent, qf1, qf2, vf],
-        latent_dim=latent_dim,
-        **variant['algo_params']
-    )
+        context_encoder = encoder_model(
+            hidden_sizes=[200, 200, 200],
+            input_size=context_encoder_input_dim,
+            output_size=context_encoder_output_dim,
+        )
+        qf1 = FlattenMlp(
+            hidden_sizes=[net_size, net_size, net_size],
+            input_size=obs_dim + action_dim + latent_dim,
+            output_size=1,
+        )
+        qf2 = FlattenMlp(
+            hidden_sizes=[net_size, net_size, net_size],
+            input_size=obs_dim + action_dim + latent_dim,
+            output_size=1,
+        )
+        vf = FlattenMlp(
+            hidden_sizes=[net_size, net_size, net_size],
+            input_size=obs_dim + latent_dim,
+            output_size=1,
+        )
+        policy = TanhGaussianPolicy(
+            hidden_sizes=[net_size, net_size, net_size],
+            obs_dim=obs_dim + latent_dim,
+            latent_dim=latent_dim,
+            action_dim=action_dim,
+        )
+        agent = PEARLAgent(
+            latent_dim,
+            context_encoder,
+            policy,
+            **variant['algo_params']
+        )
+        algorithm = PEARLSoftActorCritic(
+            env=env,
+            train_tasks=list(tasks[:variant['n_train_tasks']]),
+            eval_tasks=list(tasks[-variant['n_eval_tasks']:]),
+            nets=[agent, qf1, qf2, vf],
+            latent_dim=latent_dim,
+            **variant['algo_params']
+        )
 
-    # optionally load pre-trained weights
-    if variant['path_to_weights'] is not None:
-        path = variant['path_to_weights']
-        context_encoder.load_state_dict(torch.load(os.path.join(path, 'context_encoder.pth')))
-        qf1.load_state_dict(torch.load(os.path.join(path, 'qf1.pth')))
-        qf2.load_state_dict(torch.load(os.path.join(path, 'qf2.pth')))
-        vf.load_state_dict(torch.load(os.path.join(path, 'vf.pth')))
-        # TODO hacky, revisit after model refactor
-        algorithm.networks[-2].load_state_dict(torch.load(os.path.join(path, 'target_vf.pth')))
-        policy.load_state_dict(torch.load(os.path.join(path, 'policy.pth')))
+        # optionally load pre-trained weights
+        if variant['path_to_weights'] is not None:
+            path = variant['path_to_weights']
+            context_encoder.load_state_dict(torch.load(os.path.join(path, 'context_encoder.pth')))
+            qf1.load_state_dict(torch.load(os.path.join(path, 'qf1.pth')))
+            qf2.load_state_dict(torch.load(os.path.join(path, 'qf2.pth')))
+            vf.load_state_dict(torch.load(os.path.join(path, 'vf.pth')))
+            # TODO hacky, revisit after model refactor
+            algorithm.networks[-2].load_state_dict(torch.load(os.path.join(path, 'target_vf.pth')))
+            policy.load_state_dict(torch.load(os.path.join(path, 'policy.pth')))
+
+
 
     # optional GPU mode
     ptu.set_gpu_mode(variant['util_params']['use_gpu'], variant['util_params']['gpu_id'])

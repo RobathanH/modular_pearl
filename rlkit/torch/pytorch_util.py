@@ -119,3 +119,7 @@ def zeros_like(*args, **kwargs):
 
 def normal(*args, **kwargs):
     return torch.normal(*args, **kwargs).to(device)
+
+
+def arange(*args, **kwargs):
+    return torch.arange(*args, **kwargs).to(device)
