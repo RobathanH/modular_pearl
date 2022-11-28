@@ -53,24 +53,27 @@ def experiment(variant):
         context_graph_encoder = encoder_model(
             hidden_sizes=[200, 200, 200],
             input_size=context_encoder_input_dim,
-            output_size=(inner_node_count**2) * (inner_edge_types + 1)
+            output_size=(inner_node_count**2) * inner_edge_types
         )
         qf1 = GraphModule(
             input_dim=obs_dim + action_dim + latent_dim,
             output_dim=1,
             node_dim=inner_dim,
+            graph_conv_iterations=graph_conv_iterations,
             node_edge_types=inner_edge_types
         )
         qf2 = GraphModule(
             input_dim=obs_dim + action_dim + latent_dim,
             output_dim=1,
             node_dim=inner_dim,
+            graph_conv_iterations=graph_conv_iterations,
             node_edge_types=inner_edge_types
         )
         vf = GraphModule(
             input_dim=obs_dim + latent_dim,
             output_dim=1,
             node_dim=inner_dim,
+            graph_conv_iterations=graph_conv_iterations,
             node_edge_types=inner_edge_types
         )
         policy = Graph_TanhGaussianPolicy(

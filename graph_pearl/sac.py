@@ -261,7 +261,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             
             # Update context graph encoder to match results from sim annealing
             self.context_graph_optimizer.zero_grad()
-            #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types + 1) * self.agent.graph_structure_probs.log())
+            #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types) * self.agent.graph_structure_probs.log())
             context_graph_loss = F.cross_entropy((self.agent.graph_structure_probs + 1e-9).flatten(0, -2).log(), self.agent.graph_structure.flatten())
             context_graph_loss.backward()
             self.context_graph_optimizer.step()
@@ -322,6 +322,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 policy_loss
             ))
             self.eval_statistics['Context Graph Encoder Loss'] = ptu.get_numpy(context_graph_loss)
+            self.eval_statistics['Train Task Indices'] = indices
             self.eval_statistics['Context Graph Structure'] = ptu.get_numpy(graph_structure)
             self.eval_statistics.update(create_stats_ordered_dict(
                 'Q Predictions',

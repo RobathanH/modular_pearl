@@ -57,6 +57,7 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
             input_dim=state_dim + latent_dim,
             output_dim=2 * action_dim,
             node_dim=inner_node_dim,
+            graph_conv_iterations=conv_iterations,
             node_edge_types=inner_node_edges
         )
 

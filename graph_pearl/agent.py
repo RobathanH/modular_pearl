@@ -67,7 +67,7 @@ class Graph_PEARLAgent(nn.Module):
         self.sim_anneal_proposals = kwargs['sim_anneal_proposals']
 
         self.context_vector_encoder = context_vector_encoder # (context -> z_means, z_vars)
-        self.context_graph_encoder = context_graph_encoder # (context -> inner_edge_probs (innner_node_count, inner_node_count, inner_edge_types + 1))
+        self.context_graph_encoder = context_graph_encoder # (context -> inner_edge_probs (innner_node_count, inner_node_count, inner_edge_types))
         self.policy = policy
         self.qf1 = qf1
         self.qf2 = qf2
@@ -86,7 +86,7 @@ class Graph_PEARLAgent(nn.Module):
         self.register_buffer('z_means', torch.zeros(1, latent_dim))
         self.register_buffer('z_vars', torch.zeros(1, latent_dim))
         self.register_buffer('graph_structure', torch.zeros(1, self.inner_node_count, self.inner_node_count))
-        self.register_buffer('graph_structure_probs', torch.zeros(1, self.inner_node_count, self.inner_node_count, self.inner_edge_types + 1))
+        self.register_buffer('graph_structure_probs', torch.zeros(1, self.inner_node_count, self.inner_node_count, self.inner_edge_types))
 
         self.clear_z()
 
@@ -103,7 +103,7 @@ class Graph_PEARLAgent(nn.Module):
             var = ptu.zeros(num_tasks, self.latent_dim)
         self.z_means = mu
         self.z_vars = var
-        self.graph_structure_probs = ptu.ones(num_tasks, self.inner_node_count, self.inner_node_count, self.inner_edge_types + 1) / (self.inner_edge_types + 1)
+        self.graph_structure_probs = ptu.ones(num_tasks, self.inner_node_count, self.inner_node_count, self.inner_edge_types) / (self.inner_edge_types)
         
         # sample a new z from the prior
         self.sample_z()
@@ -180,7 +180,7 @@ class Graph_PEARLAgent(nn.Module):
         graph_edge_params = graph_edge_params.sum(dim=1)
         self.graph_structure_probs = graph_edge_params / graph_edge_params.sum(dim=-1, keepdim=True)
         '''
-        graph_edge_prob_logits = self.context_graph_encoder(packed_context).view(*packed_context.shape[:2], self.inner_node_count, self.inner_node_count, self.inner_edge_types + 1)
+        graph_edge_prob_logits = self.context_graph_encoder(packed_context).view(*packed_context.shape[:2], self.inner_node_count, self.inner_node_count, self.inner_edge_types)
         graph_edge_prob_logits = graph_edge_prob_logits.sum(dim=1)
         self.graph_structure_probs = F.softmax(graph_edge_prob_logits, dim=-1)
         
@@ -254,7 +254,7 @@ class Graph_PEARLAgent(nn.Module):
             node_i = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
             node_j = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
             #edge_type = torch.multinomial(self.graph_structure_probs[torch.arange(num_tasks), node_i, node_j], num_samples=1)[:, 0]
-            edge_type = ptu.from_numpy(np.random.choice(self.inner_edge_types + 1, size=num_tasks)).long()
+            edge_type = ptu.from_numpy(np.random.choice(self.inner_edge_types, size=num_tasks)).long()
             
             # Apply proposed changes for each task subgraph
             proposed_structure = self.graph_structure.clone()

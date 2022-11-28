@@ -458,7 +458,7 @@ class GraphModule(PyTorchModule):
             gnn.HeteroConv({
                 (Node.INNER, f"to_{i}", Node.INNER): GCNConv(
                     node_dim, node_dim,
-                    node_dim=0
+                    node_dim=0, add_self_loops=False
                 )
                 for i in range(node_edge_types)
             })
