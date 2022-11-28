@@ -10,7 +10,7 @@ from rlkit.torch.core import PyTorchModule
 from rlkit.torch.core import np_ify
 
 from .graph_utils import Node
-from .graph_modules import GraphTransformer
+from .graph_modules import GraphModule
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -53,29 +53,27 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
         self.latent_dim = latent_dim
         self.action_dim = action_dim
         
-        self.module = GraphTransformer(
-            {
-                Node.STATE_IN: state_dim,
-                Node.LATENT_IN: latent_dim
-            },
-            inner_node_dim,
-            inner_node_edges,
-            2 * action_dim,
-            conv_iterations
+        self.module = GraphModule(
+            input_dim=state_dim + latent_dim,
+            output_dim=2 * action_dim,
+            node_dim=inner_node_dim,
+            node_edge_types=inner_node_edges
         )
 
-    def get_action(self, graph: gtorch.data.HeteroData, deterministic: bool = False):
-        actions = self.get_actions(graph, deterministic=deterministic)
+    def get_action(self, state: torch.Tensor, latent: torch.Tensor, graph_structure: torch.Tensor, deterministic: bool = False):
+        actions = self.get_actions(state, latent, graph_structure, deterministic=deterministic)
         return actions[0, :], {}
 
     @torch.no_grad()
-    def get_actions(self, graph: gtorch.data.HeteroData, deterministic: bool = False):
-        outputs = self.forward(graph, deterministic=deterministic)[0]
+    def get_actions(self, state: torch.Tensor, latent: torch.Tensor, graph_structure: torch.Tensor, deterministic: bool = False):
+        outputs = self.forward(state, latent, graph_structure, deterministic=deterministic)[0]
         return np_ify(outputs)
 
     def forward(
             self,
-            graph: gtorch.data.HeteroData,
+            state: torch.Tensor,
+            latent: torch.Tensor,
+            graph_structure: torch.Tensor,
             reparameterize: bool = False,
             deterministic: bool = False,
             return_log_prob: bool = False,
@@ -85,7 +83,7 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
         :param deterministic: If True, do not sample
         :param return_log_prob: If True, return a sample and its log probability
         """
-        mean, log_std = torch.tensor_split(self.module(graph), 2, dim=-1)
+        mean, log_std = torch.tensor_split(self.module(state, latent, graph_structure=graph_structure), 2, dim=-1)
         log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
         std = torch.exp(log_std)
 
@@ -128,10 +126,10 @@ class MakeDeterministic(Wrapper, Policy):
         super().__init__(stochastic_policy)
         self.stochastic_policy = stochastic_policy
 
-    def get_action(self, observation):
-        return self.stochastic_policy.get_action(observation,
+    def get_action(self, *input):
+        return self.stochastic_policy.get_action(*input,
                                                  deterministic=True)
 
-    def get_actions(self, observations):
-        return self.stochastic_policy.get_actions(observations,
+    def get_actions(self, *input):
+        return self.stochastic_policy.get_actions(*input,
                                                   deterministic=True)

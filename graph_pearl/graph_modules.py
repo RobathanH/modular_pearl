@@ -9,6 +9,7 @@ import torch_geometric as gtorch
 import torch_geometric.nn as gnn
 
 from rlkit.torch.core import PyTorchModule
+import rlkit.torch.pytorch_util as ptu
 
 from .graph_utils import Node, get_inner_edge_keys
 
@@ -238,19 +239,267 @@ class GraphTransformer(PyTorchModule):
         # Run GNN iterations
         x_dict = graph.x_dict
         edge_index_dict = graph.edge_index_dict
-
+        print(x_dict[Node.INNER].shape, "\n", x_dict[Node.INNER][..., :4, 0])
         for i in range(self.iterations):
             x_dict = self.conv(x_dict, edge_index_dict)
             
             # Remove input node types after first layer
             if i == 0:
                 x_dict = {Node.INNER: x_dict[Node.INNER]}
-                edge_index_dict = {key: val.long() for key, val in edge_index_dict.items() if key[0] == Node.INNER and key[2] == Node.INNER}
+                edge_index_dict = {key: val for key, val in edge_index_dict.items() if key[0] == Node.INNER and key[2] == Node.INNER}
             
             # Activation
             x_dict = {key: F.relu(val) for key, val in x_dict.items()}
             
+            print(x_dict[Node.INNER].shape, "\n", x_dict[Node.INNER][..., :4, 0])
+            
         x = x_dict[Node.INNER]
         x = self.out_transform(x)
+        print(x.shape, "\n", x[..., :4, 0])
         x = self.out_pool(x, index=graph[Node.INNER].batch, dim=0)
+        print(x.shape, "\n", x[..., :4, 0])
         return x
+    
+    
+    
+'''
+class GraphModule(PyTorchModule):
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int,
+                 node_dim: int,
+                 node_edge_types: int):
+        self.save_init_params(locals())
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.node_dim = node_dim
+        self.node_edge_types = node_edge_types
+        
+        self.input_transform = nn.Linear(input_dim, node_dim)
+        self.output_transform = nn.Linear(node_dim, output_dim)
+        self.output_pool = gnn.aggr.MeanAggregation()
+        
+        self.gnn_layers = nn.ModuleList([
+            gnn.RGATConv(node_dim, node_dim, node_edge_types)
+            for _ in range(4)
+        ])
+        
+    def forward(self, *input_features: torch.Tensor, graph_structure: torch.Tensor) -> torch.Tensor:
+        """_summary_
+
+        Args:
+            input_features (torch.Tensor): Shape = (num_tasks, batch_size, input_dim)
+            graph_structure (torch.Tensor): Shape = (num_tasks, node_count, node_count) in {0, ..., node_edge_types}
+
+        Returns:
+            torch.Tensor: Shape = (num_tasks, batch_size, output_dim)
+        """
+        num_tasks, node_count, _ = graph_structure.size()
+        
+        input_features = torch.cat(input_features, dim=-1)
+        transformed_input = self.input_transform(input_features)
+        
+        # One for each task (separate graph), same for each node within a task
+        node_features = torch.repeat_interleave(transformed_input, node_count, dim=0)
+        node_task_indices = torch.repeat_interleave(ptu.arange(num_tasks), node_count)
+        
+        # Differs between tasks, one for each node-pair in each task
+        # Referenced node indices must be incremented so they don't overlap between tasks
+        orig_edge_index = (graph_structure < self.node_edge_types).nonzero().transpose(0, 1).long()
+        edge_index = orig_edge_index[1:, :] + orig_edge_index[0, :].unsqueeze(0) * node_count # Increment node indices based on which task they're from
+        edge_type = graph_structure[orig_edge_index[0], orig_edge_index[1], orig_edge_index[2]]
+        
+        x = node_features
+        for gnn_layer in self.gnn_layers:
+            x = gnn_layer(x, edge_index, edge_type)
+            
+        pooled = self.output_pool(x, index=node_task_indices, dim=0)
+        output = self.output_transform(pooled)
+        return output
+'''
+
+from typing import Optional, Tuple
+
+import torch
+from torch import Tensor
+from torch.nn import Parameter
+from torch_scatter import scatter_add
+from torch_sparse import SparseTensor, fill_diag, matmul, mul
+from torch_sparse import sum as sparsesum
+
+from torch_geometric.nn.conv import MessagePassing
+from torch_geometric.nn.dense.linear import Linear
+from torch_geometric.nn.inits import zeros
+from torch_geometric.typing import Adj, OptTensor, PairTensor
+from torch_geometric.utils import add_remaining_self_loops
+from torch_geometric.utils.num_nodes import maybe_num_nodes
+
+def gcn_norm(edge_index, edge_weight=None, num_nodes=None, improved=False,
+             add_self_loops=True, flow="source_to_target", dtype=None):
+
+    fill_value = 2. if improved else 1.
+
+    if isinstance(edge_index, SparseTensor):
+        assert flow in ["source_to_target"]
+        adj_t = edge_index
+        if not adj_t.has_value():
+            adj_t = adj_t.fill_value(1., dtype=dtype)
+        if add_self_loops:
+            adj_t = fill_diag(adj_t, fill_value)
+        deg = sparsesum(adj_t, dim=1)
+        deg_inv_sqrt = deg.pow_(-0.5)
+        deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0.)
+        adj_t = mul(adj_t, deg_inv_sqrt.view(-1, 1))
+        adj_t = mul(adj_t, deg_inv_sqrt.view(1, -1))
+        return adj_t
+
+    else:
+        assert flow in ["source_to_target", "target_to_source"]
+        num_nodes = maybe_num_nodes(edge_index, num_nodes)
+
+        if edge_weight is None:
+            edge_weight = torch.ones((edge_index.size(1), ), dtype=dtype,
+                                     device=edge_index.device)
+
+        if add_self_loops:
+            edge_index, tmp_edge_weight = add_remaining_self_loops(
+                edge_index, edge_weight, fill_value, num_nodes)
+            assert tmp_edge_weight is not None
+            edge_weight = tmp_edge_weight
+
+        row, col = edge_index[0], edge_index[1]
+        idx = col if flow == "source_to_target" else row
+        deg = scatter_add(edge_weight, idx, dim=0, dim_size=num_nodes)
+        deg_inv_sqrt = deg.pow_(-0.5)
+        deg_inv_sqrt.masked_fill_(deg_inv_sqrt == float('inf'), 0)
+        return edge_index, deg_inv_sqrt[row] * edge_weight * deg_inv_sqrt[col]
+
+
+class GCNConv(MessagePassing):
+    def __init__(self, in_channels: int, out_channels: int,
+                 improved: bool = False,
+                 add_self_loops: bool = True, normalize: bool = True,
+                 bias: bool = True, **kwargs):
+
+        kwargs.setdefault('aggr', 'add')
+        super().__init__(**kwargs)
+
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.improved = improved
+        self.add_self_loops = add_self_loops
+        self.normalize = normalize
+
+        self.lin = Linear(in_channels, out_channels, bias=False,
+                          weight_initializer='glorot')
+
+        if bias:
+            self.bias = Parameter(torch.Tensor(out_channels))
+        else:
+            self.register_parameter('bias', None)
+
+        self.reset_parameters()
+
+    def reset_parameters(self):
+        self.lin.reset_parameters()
+        zeros(self.bias)
+
+    def forward(self, x: Tensor, edge_index: Adj,
+                edge_weight: OptTensor = None) -> Tensor:
+        """"""
+
+        if self.normalize:
+            edge_index, edge_weight = gcn_norm(  # yapf: disable
+                edge_index, edge_weight, x.size(self.node_dim),
+                self.improved, self.add_self_loops, self.flow)
+
+        x = self.lin(x)
+
+        # propagate_type: (x: Tensor, edge_weight: OptTensor)
+        out = self.propagate(edge_index, x=x, edge_weight=edge_weight,
+                             size=None)
+
+        if self.bias is not None:
+            out += self.bias
+
+        return out
+
+    def message(self, x_j: Tensor, edge_weight: OptTensor) -> Tensor:
+        x_feature_dims = x_j.dim() - 1
+        return x_j if edge_weight is None else edge_weight.view(-1, *(1,) * x_feature_dims) * x_j
+
+    def message_and_aggregate(self, adj_t: SparseTensor, x: Tensor) -> Tensor:
+        return matmul(adj_t, x, reduce=self.aggr)
+
+
+class GraphModule(PyTorchModule):
+    def __init__(self,
+                 input_dim: int,
+                 output_dim: int,
+                 node_dim: int,
+                 graph_conv_iterations: int,
+                 node_edge_types: int):
+        self.save_init_params(locals())
+        super().__init__()
+        
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.node_dim = node_dim
+        self.graph_conv_iterations = graph_conv_iterations
+        self.node_edge_types = node_edge_types
+        
+        self.input_transform = nn.Linear(input_dim, node_dim)
+        self.output_transform = nn.Linear(node_dim, output_dim)
+        self.output_pool = gnn.aggr.MeanAggregation()
+        
+        self.gnn_layers = nn.ModuleList([
+            gnn.HeteroConv({
+                (Node.INNER, f"to_{i}", Node.INNER): GCNConv(
+                    node_dim, node_dim,
+                    node_dim=0
+                )
+                for i in range(node_edge_types)
+            })
+            for _ in range(graph_conv_iterations)
+        ])
+        
+    def forward(self, *input_features: torch.Tensor, graph_structure: torch.Tensor) -> torch.Tensor:
+        """_summary_
+
+        Args:
+            input_features (torch.Tensor): Shape = (num_tasks, batch_size, input_dim)
+            graph_structure (torch.Tensor): Shape = (num_tasks, node_count, node_count) in {0, ..., node_edge_types}
+
+        Returns:
+            torch.Tensor: Shape = (num_tasks, batch_size, output_dim)
+        """
+        num_tasks, node_count, _ = graph_structure.size()
+        
+        input_features = torch.cat(input_features, dim=-1)
+        transformed_input = F.relu(self.input_transform(input_features))
+        
+        # One for each task (separate graph), same for each node within a task
+        node_features = torch.repeat_interleave(transformed_input, node_count, dim=0)
+        node_task_indices = torch.repeat_interleave(ptu.arange(num_tasks), node_count)
+        
+        # Differs between tasks, one for each node-pair in each task
+        # Referenced node indices must be incremented so they don't overlap between tasks
+        orig_edge_index = (graph_structure < self.node_edge_types).nonzero().transpose(0, 1).long()
+        edge_index = orig_edge_index[1:, :] + orig_edge_index[0, :].unsqueeze(0) * node_count # Increment node indices based on which task they're from
+        edge_type = graph_structure[orig_edge_index[0], orig_edge_index[1], orig_edge_index[2]]
+        
+        x_dict = {Node.INNER: node_features}
+        edge_index_dict = {
+            (Node.INNER, f"to_{i}", Node.INNER): edge_index[:, (edge_type == i).nonzero()[:, 0].long()]
+            for i in range(self.node_edge_types)
+        }
+        
+        for gnn_layer in self.gnn_layers:
+            x_dict = gnn_layer(x_dict, edge_index_dict)
+            x_dict = {key: F.relu(val) for key, val in x_dict.items()}
+            
+        pooled = self.output_pool(x_dict[Node.INNER], index=node_task_indices, dim=0)
+        output = self.output_transform(pooled)
+        return output

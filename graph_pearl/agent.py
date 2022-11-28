@@ -130,15 +130,13 @@ class Graph_PEARLAgent(nn.Module):
         a = ptu.from_numpy(a[None, None, ...])
         r = ptu.from_numpy(np.array([r])[None, None, ...])
         no = ptu.from_numpy(no[None, None, ...])
+        d = ptu.from_numpy(np.array([[d]]))
 
-        if self.use_next_obs_in_context:
-            data = torch.cat([o, a, r, no], dim=2)
-        else:
-            data = torch.cat([o, a, r], dim=2)
+        data = [o, a, r, no, d]
         if self.context is None:
             self.context = data
         else:
-            self.context = torch.cat([self.context, data], dim=1)
+            self.context = [torch.cat([context_component, new_component], dim=1) for context_component, new_component in zip(self.context, data)]
 
     # TODO: Include graph structure proposer in KL-Divergence loss?
     def compute_kl_div(self):
@@ -215,14 +213,25 @@ class Graph_PEARLAgent(nn.Module):
     def graph_structure_loss(self, context, proposed_graph_structure):
         context_obs, context_act, context_r, context_next_obs, context_terms = context
         
+        '''
         state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                              proposed_graph_structure, context_obs, self.z, action=context_act)
         next_state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                            proposed_graph_structure, context_next_obs, self.z, action=None)
-        
+        #print(state_action_input)
+        #print(state_action_input.x_dict)
+        #print(state_action_input.edge_index_dict)
         q1_pred = self.qf1(state_action_input)
         q2_pred = self.qf2(state_action_input)
         v_pred = self.vf(next_state_input)
+        #print("q1", q1_pred)
+        #print("q2", q2_pred)
+        #print("v", v_pred)
+        '''
+        latent = self.z.unsqueeze(1).expand(-1, context_obs.size(1), -1)
+        q1_pred = self.qf1(context_obs, context_act, latent, graph_structure=proposed_graph_structure)
+        q2_pred = self.qf2(context_obs, context_act, latent, graph_structure=proposed_graph_structure)
+        v_pred = self.vf(context_next_obs, latent, graph_structure=proposed_graph_structure)
         
         q_target = context_r * self.reward_scale + \
             (1. - context_terms) * self.discount * v_pred
@@ -238,7 +247,9 @@ class Graph_PEARLAgent(nn.Module):
         
         total_accepted = 0
         curr_structure_loss = self.graph_structure_loss(context, self.graph_structure)
-        print(f"Orig Structure Loss: {curr_structure_loss.tolist()}")
+        all_structure_losses = [curr_structure_loss]
+        all_proposed_structure_losses = []
+        #print(f"Orig Structure Loss: {curr_structure_loss.tolist()}")
         for step in range(self.sim_anneal_proposals):
             node_i = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
             node_j = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
@@ -268,8 +279,13 @@ class Graph_PEARLAgent(nn.Module):
                 self.graph_structure[accepted_task_inds, node_i[accepted_task_inds], node_j[accepted_task_inds]] = edge_type[accepted_task_inds]
                 curr_structure_loss = torch.where(accept, proposed_structure_loss, curr_structure_loss)
                 
-        print(f"Final Structure Loss: {curr_structure_loss.tolist()}")
-        print(f"Accept Rate: {total_accepted / (self.sim_anneal_proposals * num_tasks)}")
+            all_structure_losses.append(curr_structure_loss)
+            all_proposed_structure_losses.append(proposed_structure_loss)
+                
+        #print(f"Final Structure Loss: {curr_structure_loss.tolist()}")
+        #print(f"Accept Rate: {total_accepted / (self.sim_anneal_proposals * num_tasks)}")
+        #print(f"Structure Loss Std: {torch.std(torch.vstack(all_structure_losses), dim=0)}")
+        #print(f"Proposed Structure Loss Std: {torch.std(torch.vstack(all_proposed_structure_losses), dim=0)}")
 
     @torch.no_grad()
     def get_action(self, obs, deterministic=False):
@@ -277,10 +293,13 @@ class Graph_PEARLAgent(nn.Module):
         state = ptu.from_numpy(obs[None, None])
         latent = self.z.unsqueeze(1).expand(-1, state.size(1), -1)
         
+        '''
         filled_graph = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                     self.graph_structure, state, latent, action=None)
         
         action, info = self.policy.get_action(filled_graph, deterministic=deterministic)
+        '''
+        action, info = self.policy.get_action(state, latent, graph_structure=self.graph_structure)
         return action[0], info
 
     def set_num_steps_total(self, n):
@@ -293,12 +312,14 @@ class Graph_PEARLAgent(nn.Module):
         t, b, _ = obs.size()
         state = obs
         latent = self.z.view(t, 1, -1).expand(-1, b, -1).detach()
-        graph_structure = self.graph_structure
         
+        '''
         filled_graph = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                        graph_structure, state, latent, action=None)
 
         policy_outputs = self.policy(filled_graph, reparameterize=True, return_log_prob=True)
+        '''
+        policy_outputs = self.policy(state, latent, graph_structure=self.graph_structure, reparameterize=True, return_log_prob=True)
         
         return policy_outputs
 

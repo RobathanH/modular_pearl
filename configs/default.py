@@ -15,12 +15,12 @@ default_config = dict(
     algo_params=dict(
         inner_node_count=3,
         inner_edge_types=2,
-        inner_dim=200,
+        inner_dim=300,
         sim_anneal_temp=1E-4,
         sim_anneal_proposals=10,
         bouncegrad_iterations=10,
         context_graph_lr=3E-4,
-        graph_conv_iterations=4,
+        graph_conv_iterations=2,
         
         meta_batch=16, # number of tasks to average the gradient across
         num_iterations=500, # number of data sampling / training iterates

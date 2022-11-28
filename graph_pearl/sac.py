@@ -190,10 +190,14 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.agent.detach_z()
 
     def _min_q(self, obs, actions, latent, graph_structure):
+        '''
         state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                              graph_structure, obs, latent.detach(), action=actions)
         q1 = self.qf1(state_action_input)
         q2 = self.qf2(state_action_input)
+        '''
+        q1 = self.qf1(obs, actions, latent, graph_structure=graph_structure)
+        q2 = self.qf2(obs, actions, latent, graph_structure=graph_structure)
         min_q = torch.min(q1, q2)
         return min_q
 
@@ -217,6 +221,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
 
             # Q and V networks
             # encoder will only get gradients from Q nets (through state_action_input)
+            '''
             state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                                 graph_structure, obs, latent, action=actions)
             q1_pred = self.qf1(state_action_input)
@@ -229,6 +234,12 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 next_state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
                                             graph_structure, next_obs, latent)
                 target_v_values = self.target_vf(next_state_input)
+            '''
+            q1_pred = self.qf1(obs, actions, latent, graph_structure=graph_structure)
+            q2_pred = self.qf2(obs, actions, latent, graph_structure=graph_structure)
+            v_pred = self.vf(obs, latent.detach(), graph_structure=graph_structure)
+            with torch.no_grad():
+                target_v_values = self.target_vf(next_obs, latent, graph_structure=graph_structure)
 
             # KL constraint on z if probabilistic
             self.context_vector_optimizer.zero_grad()
@@ -256,7 +267,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.context_graph_optimizer.step()
 
             # compute min Q on the new actions
-            min_q_new_actions = self._min_q(obs, new_actions, latent, graph_structure)
+            min_q_new_actions = self._min_q(obs, new_actions, latent.detach(), graph_structure)
 
             # vf update
             v_target = min_q_new_actions - log_pi
@@ -310,6 +321,8 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.eval_statistics['Policy Loss'] = np.mean(ptu.get_numpy(
                 policy_loss
             ))
+            self.eval_statistics['Context Graph Encoder Loss'] = ptu.get_numpy(context_graph_loss)
+            self.eval_statistics['Context Graph Structure'] = ptu.get_numpy(graph_structure)
             self.eval_statistics.update(create_stats_ordered_dict(
                 'Q Predictions',
                 ptu.get_numpy(q1_pred),

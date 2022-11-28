@@ -31,7 +31,7 @@ def experiment(variant):
 
     # instantiate networks
     if variant['graph_pearl']:
-        from graph_pearl import Node, GraphTransformer, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
+        from graph_pearl import Node, GraphModule, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
         
         inner_node_count = variant['algo_params']['inner_node_count']
         inner_edge_types = variant['algo_params']['inner_edge_types']
@@ -55,37 +55,23 @@ def experiment(variant):
             input_size=context_encoder_input_dim,
             output_size=(inner_node_count**2) * (inner_edge_types + 1)
         )
-        qf1 = GraphTransformer(
-            {
-                Node.LATENT_IN: latent_dim,
-                Node.STATE_IN: obs_dim,
-                Node.ACTION_IN: action_dim
-            },
-            inner_dim,
-            inner_edge_types,
-            1,
-            graph_conv_iterations
+        qf1 = GraphModule(
+            input_dim=obs_dim + action_dim + latent_dim,
+            output_dim=1,
+            node_dim=inner_dim,
+            node_edge_types=inner_edge_types
         )
-        qf2 = GraphTransformer(
-            {
-                Node.LATENT_IN: latent_dim,
-                Node.STATE_IN: obs_dim,
-                Node.ACTION_IN: action_dim
-            },
-            inner_dim,
-            inner_edge_types,
-            1,
-            graph_conv_iterations
+        qf2 = GraphModule(
+            input_dim=obs_dim + action_dim + latent_dim,
+            output_dim=1,
+            node_dim=inner_dim,
+            node_edge_types=inner_edge_types
         )
-        vf = GraphTransformer(
-            {
-                Node.LATENT_IN: latent_dim,
-                Node.STATE_IN: obs_dim
-            },
-            inner_dim,
-            inner_edge_types,
-            1,
-            graph_conv_iterations
+        vf = GraphModule(
+            input_dim=obs_dim + latent_dim,
+            output_dim=1,
+            node_dim=inner_dim,
+            node_edge_types=inner_edge_types
         )
         policy = Graph_TanhGaussianPolicy(
             inner_dim,
