@@ -60,11 +60,20 @@ class Graph_PEARLAgent(nn.Module):
         
         self.latent_dim = latent_dim
         
+        # Treat latent_dim = 0 as a flag for special mode where latent is set to None for all modules
+        # Effectively ignores latent without having to disable all infrastructure which assumes latent exists
+        if latent_dim == 0:
+            latent_dim = 1
+            self.latent_dim = 1
+            self.disable_vector_latent = True
+        else:
+            self.disable_vector_latent = False
+        
         self.inner_node_count = kwargs['inner_node_count']
         self.inner_edge_types = kwargs['inner_edge_types']
         self.inner_dim = kwargs['inner_dim']
-        self.sim_anneal_temp = kwargs['sim_anneal_temp']
         self.sim_anneal_proposals = kwargs['sim_anneal_proposals']
+        self.sim_anneal_temp = kwargs['sim_anneal_init_temp']
 
         self.context_vector_encoder = context_vector_encoder # (context -> z_means, z_vars)
         self.context_graph_encoder = context_graph_encoder # (context -> inner_edge_probs (innner_node_count, inner_node_count, inner_edge_types))
@@ -87,6 +96,9 @@ class Graph_PEARLAgent(nn.Module):
         self.register_buffer('z_vars', torch.zeros(1, latent_dim))
         self.register_buffer('graph_structure', torch.zeros(1, self.inner_node_count, self.inner_node_count))
         self.register_buffer('graph_structure_probs', torch.zeros(1, self.inner_node_count, self.inner_node_count, self.inner_edge_types))
+
+        # Maintain statistics about structure annealing acceptance rate
+        self.reset_annealing_statistics()
 
         self.clear_z()
 
@@ -138,14 +150,20 @@ class Graph_PEARLAgent(nn.Module):
         else:
             self.context = [torch.cat([context_component, new_component], dim=1) for context_component, new_component in zip(self.context, data)]
 
-    # TODO: Include graph structure proposer in KL-Divergence loss?
     def compute_kl_div(self):
         ''' compute KL( q(z|c) || r(z) ) '''
-        prior = torch.distributions.Normal(ptu.zeros(self.latent_dim), ptu.ones(self.latent_dim))
-        posteriors = [torch.distributions.Normal(mu, torch.sqrt(var)) for mu, var in zip(torch.unbind(self.z_means), torch.unbind(self.z_vars))]
-        kl_divs = [torch.distributions.kl.kl_divergence(post, prior) for post in posteriors]
-        kl_div_sum = torch.sum(torch.stack(kl_divs))
-        return kl_div_sum
+        vector_prior = torch.distributions.Normal(ptu.zeros(self.latent_dim), ptu.ones(self.latent_dim))
+        vector_posteriors = [torch.distributions.Normal(mu, torch.sqrt(var)) for mu, var in zip(torch.unbind(self.z_means), torch.unbind(self.z_vars))]
+        vector_kl_divs = [torch.distributions.kl.kl_divergence(post, vector_prior) for post in vector_posteriors]
+        vector_kl_div_sum = torch.sum(torch.stack(vector_kl_divs))
+        
+        ''' compute categorical KL div for graph latent encoder '''
+        graph_prior = torch.distributions.Categorical(ptu.ones(self.inner_edge_types) / self.inner_edge_types)
+        graph_posteriors = [torch.distributions.Categorical(edge_probs) for edge_probs in torch.unbind(self.graph_structure_probs.view(-1, self.inner_edge_types))]
+        graph_kl_divs = [torch.distributions.kl.kl_divergence(post, graph_prior) for post in graph_posteriors]
+        graph_kl_div_sum = torch.sum(torch.stack(graph_kl_divs))
+        
+        return vector_kl_div_sum, graph_kl_div_sum
 
     def infer_posterior(self, context, update_graph_structure=True):
         # Package context components for probabilistic encoders, which takes flattened vec inputs
@@ -229,6 +247,8 @@ class Graph_PEARLAgent(nn.Module):
         #print("v", v_pred)
         '''
         latent = self.z.unsqueeze(1).expand(-1, context_obs.size(1), -1)
+        if self.disable_vector_latent:
+            latent = None
         q1_pred = self.qf1(context_obs, context_act, latent, graph_structure=proposed_graph_structure)
         q2_pred = self.qf2(context_obs, context_act, latent, graph_structure=proposed_graph_structure)
         v_pred = self.vf(context_next_obs, latent, graph_structure=proposed_graph_structure)
@@ -245,7 +265,6 @@ class Graph_PEARLAgent(nn.Module):
         # TODO: See if there is efficiency increase from only changing the edge dict in each annealing step,
         # rather than reconstructing from self.graph_structure
         
-        total_accepted = 0
         curr_structure_loss = self.graph_structure_loss(context, self.graph_structure)
         all_structure_losses = [curr_structure_loss]
         all_proposed_structure_losses = []
@@ -253,12 +272,20 @@ class Graph_PEARLAgent(nn.Module):
         for step in range(self.sim_anneal_proposals):
             node_i = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
             node_j = ptu.from_numpy(np.random.choice(self.inner_node_count, size=num_tasks)).long()
-            #edge_type = torch.multinomial(self.graph_structure_probs[torch.arange(num_tasks), node_i, node_j], num_samples=1)[:, 0]
-            edge_type = ptu.from_numpy(np.random.choice(self.inner_edge_types, size=num_tasks)).long()
+            
+            # Get probabilities for each chosen node-pair from graph structure encoder,
+            proposal_edge_type_probs = self.graph_structure_probs[torch.arange(num_tasks), node_i, node_j].detach().clone()
+            
+            # then zero-out probability for current edge type (so proposal is definitely different from current)
+            curr_edge_types = self.graph_structure[torch.arange(num_tasks), node_i, node_j]
+            proposal_edge_type_probs[torch.arange(num_tasks), curr_edge_types] = 0
+            
+            # Sample proposal edge types from graph structure encoder edge-type distribution
+            proposal_edge_types = torch.multinomial(proposal_edge_type_probs, num_samples=1)[:, 0]
             
             # Apply proposed changes for each task subgraph
             proposed_structure = self.graph_structure.clone()
-            proposed_structure[torch.arange(num_tasks), node_i, node_j] = edge_type
+            proposed_structure[torch.arange(num_tasks), node_i, node_j] = proposal_edge_types
             proposed_structure_loss = self.graph_structure_loss(context, proposed_structure)
             #print(node_i.tolist(), node_j.tolist(), edge_type.tolist())
             #print(f"orig: {self.graph_structure}")
@@ -267,8 +294,11 @@ class Graph_PEARLAgent(nn.Module):
             # Accept or reject change for each task
             prob_accept = ((curr_structure_loss - proposed_structure_loss) / self.sim_anneal_temp).exp()
             accept = (ptu.from_numpy(np.random.uniform(size=prob_accept.shape)) <= prob_accept)
-            total_accepted += accept.sum()
             accepted_task_inds = accept.nonzero()
+            
+            worse = (proposed_structure_loss > curr_structure_loss)
+            self.structure_worse_proposals_count += worse.sum().item()
+            self.structure_worse_proposals_accepted += (worse & accept).sum().item()
             
             #print(prob_accept.tolist())
             #print(accept.tolist())
@@ -276,12 +306,13 @@ class Graph_PEARLAgent(nn.Module):
             #print(node_i[accepted_task_inds].tolist(), node_j[accepted_task_inds].tolist(), edge_type[accepted_task_inds].tolist())
             
             if len(accepted_task_inds):
-                self.graph_structure[accepted_task_inds, node_i[accepted_task_inds], node_j[accepted_task_inds]] = edge_type[accepted_task_inds]
+                self.graph_structure[accepted_task_inds, node_i[accepted_task_inds], node_j[accepted_task_inds]] = proposal_edge_types[accepted_task_inds]
                 curr_structure_loss = torch.where(accept, proposed_structure_loss, curr_structure_loss)
                 
             all_structure_losses.append(curr_structure_loss)
             all_proposed_structure_losses.append(proposed_structure_loss)
                 
+        self.structure_loss_std += torch.std(torch.vstack(all_proposed_structure_losses), dim=0).tolist()
         #print(f"Final Structure Loss: {curr_structure_loss.tolist()}")
         #print(f"Accept Rate: {total_accepted / (self.sim_anneal_proposals * num_tasks)}")
         #print(f"Structure Loss Std: {torch.std(torch.vstack(all_structure_losses), dim=0)}")
@@ -292,6 +323,8 @@ class Graph_PEARLAgent(nn.Module):
         ''' sample action from the policy, conditioned on the task embedding '''
         state = ptu.from_numpy(obs[None, None])
         latent = self.z.unsqueeze(1).expand(-1, state.size(1), -1)
+        if self.disable_vector_latent:
+            latent = None
         
         '''
         filled_graph = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
@@ -312,6 +345,8 @@ class Graph_PEARLAgent(nn.Module):
         t, b, _ = obs.size()
         state = obs
         latent = self.z.view(t, 1, -1).expand(-1, b, -1).detach()
+        if self.disable_vector_latent:
+            latent = None
         
         '''
         filled_graph = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
@@ -331,12 +366,29 @@ class Graph_PEARLAgent(nn.Module):
         z_sig = np.mean(ptu.get_numpy(self.z_vars[0]))
         eval_statistics['Z mean eval'] = z_mean
         eval_statistics['Z variance eval'] = z_sig
-        # TODO: Graph structure eval stats
+
+        eval_statistics['SA Temp'] = self.sim_anneal_temp
+        eval_statistics['SA Accept Rate'] = self.structure_worse_proposals_accepted / self.structure_worse_proposals_count
+        eval_statistics['SA Structure Loss Std'] = sum(self.structure_loss_std) / len(self.structure_loss_std)
 
     @property
     def networks(self):
         return [self.context_vector_encoder, self.context_graph_encoder, self.policy, self.qf1, self.qf2, self.vf]
 
+    # Manage running statistics about graph structure annealing
+    def reset_annealing_statistics(self):
+        self.structure_worse_proposals_count = 0
+        self.structure_worse_proposals_accepted = 0
+        self.structure_loss_std = [] # std of structure loss for proposals for particular tasks
 
+    # Update temperature with a small fixed multiplicative factor to move towards goal accept rate
+    def update_temp(self, goal_acc_rate: float) -> None:
+        if self.structure_worse_proposals_count == 0:
+            return
 
-
+        temp_change_factor = 1.1
+        current_accept_rate = self.structure_worse_proposals_accepted / self.structure_worse_proposals_count
+        if current_accept_rate < goal_acc_rate:
+            self.sim_anneal_temp *= temp_change_factor
+        else:
+            self.sim_anneal_temp /= temp_change_factor

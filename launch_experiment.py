@@ -31,6 +31,7 @@ def experiment(variant):
 
     # instantiate networks
     if variant['graph_pearl']:
+        assert variant['algo_params']['use_information_bottleneck'], "Only implemented for info bottleneck enabled"
         from graph_pearl import Node, GraphModule, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
         
         inner_node_count = variant['algo_params']['inner_node_count']
@@ -41,6 +42,8 @@ def experiment(variant):
         latent_dim = variant['latent_size']
         context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
         context_vector_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
+        if latent_dim == 0:
+            context_vector_encoder_output_dim = 2
         net_size = variant['net_size']
         recurrent = variant['algo_params']['recurrent']
         encoder_model = RecurrentEncoder if recurrent else MlpEncoder

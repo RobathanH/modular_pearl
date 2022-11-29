@@ -477,6 +477,7 @@ class GraphModule(PyTorchModule):
         """
         num_tasks, node_count, _ = graph_structure.size()
         
+        input_features = [x for x in input_features if x is not None]
         input_features = torch.cat(input_features, dim=-1)
         transformed_input = F.relu(self.input_transform(input_features))
         

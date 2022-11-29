@@ -1,3 +1,4 @@
+from typing import Optional
 import numpy as np
 import torch
 from torch import nn as nn
@@ -61,19 +62,19 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
             node_edge_types=inner_node_edges
         )
 
-    def get_action(self, state: torch.Tensor, latent: torch.Tensor, graph_structure: torch.Tensor, deterministic: bool = False):
+    def get_action(self, state: torch.Tensor, latent: Optional[torch.Tensor], graph_structure: torch.Tensor, deterministic: bool = False):
         actions = self.get_actions(state, latent, graph_structure, deterministic=deterministic)
         return actions[0, :], {}
 
     @torch.no_grad()
-    def get_actions(self, state: torch.Tensor, latent: torch.Tensor, graph_structure: torch.Tensor, deterministic: bool = False):
+    def get_actions(self, state: torch.Tensor, latent: Optional[torch.Tensor], graph_structure: torch.Tensor, deterministic: bool = False):
         outputs = self.forward(state, latent, graph_structure, deterministic=deterministic)[0]
         return np_ify(outputs)
 
     def forward(
             self,
             state: torch.Tensor,
-            latent: torch.Tensor,
+            latent: Optional[torch.Tensor],
             graph_structure: torch.Tensor,
             reparameterize: bool = False,
             deterministic: bool = False,

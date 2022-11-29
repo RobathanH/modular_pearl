@@ -29,9 +29,12 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             inner_dim=200,
             graph_conv_iterations=4,
             context_graph_lr=1e-3,
-            sim_anneal_temp=1e-4,
             sim_anneal_proposals=10,
             bouncegrad_iterations=10,
+            graph_kl_lambda=0.1,
+            sim_anneal_init_temp=1E-4,
+            sim_anneal_init_goal_acc_rate=0.3,
+            sim_anneal_final_goal_acc_rate=2E-3,
 
             policy_lr=1e-3,
             qf_lr=1e-3,
@@ -60,10 +63,18 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             **kwargs
         )
         
+        # Check for special mode where vector latents are ignored, and only
+        # graph structure latent is used
+        self.disable_vector_latent = (latent_dim == 0)
+        
         self.inner_node_count = inner_node_count
         self.inner_edge_types = inner_edge_types
         self.inner_dim = inner_dim
         self.bouncegrad_iterations = bouncegrad_iterations
+        self.graph_kl_lambda = graph_kl_lambda
+        self.sim_anneal_init_goal_acc_rate = sim_anneal_init_goal_acc_rate
+        self.sim_anneal_final_goal_acc_rate = sim_anneal_final_goal_acc_rate
+        self.sim_anneal_goal_acc_rate_decay_factor = np.exp(np.log(sim_anneal_final_goal_acc_rate / sim_anneal_init_goal_acc_rate) / (kwargs['num_iterations'] * kwargs['num_train_steps_per_itr']))
 
         self.soft_target_tau = soft_target_tau
         self.policy_mean_reg_weight = policy_mean_reg_weight
@@ -111,6 +122,9 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.agent.context_graph_encoder.parameters(),
             lr=context_graph_lr
         )
+        
+        # Save running goal sim-annealing accept rate, which decays over time
+        self.sim_anneal_goal_acc_rate = sim_anneal_init_goal_acc_rate
 
     ###### Torch stuff #####
     @property
@@ -177,6 +191,15 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
 
         # zero out context and hidden encoder state
         self.agent.clear_z(num_tasks=len(indices))
+        
+        # Update goal sim-anneal accept rate
+        self.sim_anneal_goal_acc_rate *= self.sim_anneal_goal_acc_rate_decay_factor
+        
+        # Update agent temperature towards goal acc rate (if previous SA statistics exist)
+        self.agent.update_temp(self.sim_anneal_goal_acc_rate)
+        
+        # Reset SA statistics
+        self.agent.reset_annealing_statistics()
 
         # do this in a loop so we can truncate backprop in the recurrent encoder
         for i in range(num_updates):
@@ -212,12 +235,20 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         
         for bouncegrad_it in range(self.bouncegrad_iterations):
             
+            if bouncegrad_it != 0:
+                self.agent.anneal_graph_structure(context)
+            
             # run inference in networks
             # Don't update graph structure in later iterations, instead we'll manually anneal
             policy_outputs = self.agent(obs, context, update_graph_structure=(bouncegrad_it == 0))
             new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
-            latent = self.agent.z.unsqueeze(1).expand(-1, obs.size(1), -1)
             graph_structure = self.agent.graph_structure
+            
+            if self.disable_vector_latent:
+                latent = detached_latent = None
+            else:
+                latent = self.agent.z.unsqueeze(1).expand(-1, obs.size(1), -1)
+                detached_latent = latent.detach()
 
             # Q and V networks
             # encoder will only get gradients from Q nets (through state_action_input)
@@ -237,16 +268,20 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             '''
             q1_pred = self.qf1(obs, actions, latent, graph_structure=graph_structure)
             q2_pred = self.qf2(obs, actions, latent, graph_structure=graph_structure)
-            v_pred = self.vf(obs, latent.detach(), graph_structure=graph_structure)
+            v_pred = self.vf(obs, detached_latent, graph_structure=graph_structure)
             with torch.no_grad():
-                target_v_values = self.target_vf(next_obs, latent, graph_structure=graph_structure)
+                target_v_values = self.target_vf(next_obs, detached_latent, graph_structure=graph_structure)
 
             # KL constraint on z if probabilistic
             self.context_vector_optimizer.zero_grad()
+            self.context_graph_optimizer.zero_grad()
             if self.use_information_bottleneck:
-                kl_div = self.agent.compute_kl_div()
-                kl_loss = self.kl_lambda * kl_div
-                kl_loss.backward(retain_graph=True)
+                vector_kl_div, graph_kl_div = self.agent.compute_kl_div()
+                vector_kl_loss = self.kl_lambda * vector_kl_div
+                vector_kl_loss.backward(retain_graph=True)
+                
+                graph_kl_loss = self.graph_kl_lambda * graph_kl_div
+                graph_kl_loss.backward(retain_graph=True)
 
             # qf and encoder update (note encoder does not get grads from policy or vf)
             self.qf1_optimizer.zero_grad()
@@ -260,14 +295,13 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.context_vector_optimizer.step()
             
             # Update context graph encoder to match results from sim annealing
-            self.context_graph_optimizer.zero_grad()
             #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types) * self.agent.graph_structure_probs.log())
             context_graph_loss = F.cross_entropy((self.agent.graph_structure_probs + 1e-9).flatten(0, -2).log(), self.agent.graph_structure.flatten())
             context_graph_loss.backward()
             self.context_graph_optimizer.step()
 
             # compute min Q on the new actions
-            min_q_new_actions = self._min_q(obs, new_actions, latent.detach(), graph_structure)
+            min_q_new_actions = self._min_q(obs, new_actions, detached_latent, graph_structure)
 
             # vf update
             v_target = min_q_new_actions - log_pi
@@ -298,10 +332,8 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             policy_loss.backward()
             self.policy_optimizer.step()
             
-            # Simulated annealing on graph structure
-            self.agent.anneal_graph_structure(context)
-            
-            
+        # Update agent sim-anneal temperature to better match current goal acc rate
+        self.agent.update_temp(self.sim_anneal_goal_acc_rate)
 
         # save some statistics for eval
         if self.eval_statistics is None:
@@ -313,8 +345,10 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 z_sig = np.mean(ptu.get_numpy(self.agent.z_vars[0]))
                 self.eval_statistics['Z mean train'] = z_mean
                 self.eval_statistics['Z variance train'] = z_sig
-                self.eval_statistics['KL Divergence'] = ptu.get_numpy(kl_div)
-                self.eval_statistics['KL Loss'] = ptu.get_numpy(kl_loss)
+                self.eval_statistics['Vector KL Divergence'] = ptu.get_numpy(vector_kl_div)
+                self.eval_statistics['Vector KL Loss'] = ptu.get_numpy(vector_kl_loss)
+                self.eval_statistics['Graph KL Divergence'] = ptu.get_numpy(graph_kl_div)
+                self.eval_statistics['Graph KL Loss'] = ptu.get_numpy(graph_kl_loss)
 
             self.eval_statistics['QF Loss'] = np.mean(ptu.get_numpy(qf_loss))
             self.eval_statistics['VF Loss'] = np.mean(ptu.get_numpy(vf_loss))
@@ -324,6 +358,8 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             self.eval_statistics['Context Graph Encoder Loss'] = ptu.get_numpy(context_graph_loss)
             self.eval_statistics['Train Task Indices'] = indices
             self.eval_statistics['Context Graph Structure'] = ptu.get_numpy(graph_structure)
+            self.eval_statistics['SA Goal Accept Rate'] = self.sim_anneal_goal_acc_rate
+            
             self.eval_statistics.update(create_stats_ordered_dict(
                 'Q Predictions',
                 ptu.get_numpy(q1_pred),
