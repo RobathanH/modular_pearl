@@ -4,6 +4,7 @@ import time
 
 import gtimer as gt
 import numpy as np
+from tqdm import trange, tqdm
 
 from rlkit.core import logger, eval_util
 from rlkit.data_management.env_replay_buffer import MultiTaskReplayBuffer
@@ -162,8 +163,9 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
                     self.task_idx = idx
                     self.env.reset_task(idx)
                     self.collect_data(self.num_initial_steps, 1, np.inf)
+                    
             # Sample data from train tasks.
-            for i in range(self.num_tasks_sample):
+            for i in trange(self.num_tasks_sample, desc="Train task data collection"):
                 idx = np.random.randint(len(self.train_tasks))
                 self.task_idx = idx
                 self.env.reset_task(idx)
@@ -180,7 +182,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
                     self.collect_data(self.num_extra_rl_steps_posterior, 1, self.update_post_train, add_to_enc_buffer=False)
 
             # Sample train tasks and compute gradient updates on parameters.
-            for train_step in range(self.num_train_steps_per_itr):
+            for train_step in trange(self.num_train_steps_per_itr, desc="Train loop"):
                 indices = np.random.choice(self.train_tasks, self.meta_batch)
                 self._do_training(indices)
                 self._n_train_steps_total += 1
@@ -466,30 +468,29 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         logger.save_extra_data(avg_test_online_return, path='online-test-epoch{}'.format(epoch))
         
         # Save average returns per task index
+        self.eval_statistics['Train Task Return Mean'] = {
+            task_ind: train_final_returns[(indices == task_ind).nonzero()].mean()
+            for task_ind in np.unique(indices)
+        }
+        self.eval_statistics['Train Task Return Max'] = {
+            task_ind: train_final_returns[(indices == task_ind).nonzero()].max()
+            for task_ind in np.unique(indices)
+        }
+        self.eval_statistics['Test Task Return Mean'] = {
+            task_ind: test_final_returns[task_ind].mean()
+            for task_ind in self.eval_tasks
+        }
+        self.eval_statistics['Test Task Return Max'] = {
+            task_ind: test_final_returns[task_ind].max()
+            for task_ind in self.eval_tasks
+        }
+        '''
         for task_ind in np.unique(indices):
             self.eval_statistics[f'Train Return Mean (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].mean()
             self.eval_statistics[f'Train Return Max (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].max()
         for task_ind in self.eval_tasks:
             self.eval_statistics[f'Test Return Mean (Task {task_ind})'] = test_final_returns[task_ind].mean()
             self.eval_statistics[f'Test Return Max (Task {task_ind})'] = test_final_returns[task_ind].max()
-        
-        '''
-        self.eval_statistics['Train Task Average Returns'] = {
-            task_ind: np.array(train_final_returns)[(indices == task_ind).nonzero()[0]].mean()
-            for task_ind in np.unique(indices)
-        }
-        self.eval_statistics['Train Task Max Returns'] = {
-            task_ind: np.array(train_final_returns)[(indices == task_ind).nonzero()[0]].max()
-            for task_ind in np.unique(indices)
-        }
-        self.eval_statistics['Test Task Average Returns'] = {
-            task_ind: np.array(test_final_returns)[(indices == task_ind).nonzero()[0]].mean()
-            for task_ind in self.eval_tasks
-        }
-        self.eval_statistics['Test Task Max Returns'] = {
-            task_ind: np.array(test_final_returns)[(indices == task_ind).nonzero()[0]].max()
-            for task_ind in self.eval_tasks
-        }
         '''
 
         for key, value in self.eval_statistics.items():

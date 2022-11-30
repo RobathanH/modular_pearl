@@ -16,7 +16,7 @@
         "bouncegrad_iterations": 1,
         "context_graph_lr": 3E-4,
         "graph_kl_lambda": 10,
-        "sim_anneal_proposals": 4,
+        "sim_anneal_train_proposals": 4,
         "sim_anneal_init_temp": 1E-2,
         "sim_anneal_init_goal_acc_rate": 0.3,
         "sim_anneal_final_goal_acc_rate": 2E-3,

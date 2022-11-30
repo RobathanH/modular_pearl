@@ -1,6 +1,7 @@
 from collections import OrderedDict
 import numpy as np
 import gtimer as gt
+from tqdm import tqdm, trange
 
 import torch
 import torch.optim as optim
@@ -32,7 +33,8 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             context_graph_lr=1e-3,
             bouncegrad_iterations=10,
             graph_kl_lambda=0.1,
-            sim_anneal_proposals=10,
+            sim_anneal_train_proposals=10,
+            sim_anneal_eval_proposals=1000,
             sim_anneal_init_temp=1E-4,
             sim_anneal_init_goal_acc_rate=0.3,
             sim_anneal_final_goal_acc_rate=2E-3,
@@ -193,12 +195,10 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         self.agent.clear_z(num_tasks=len(indices))
         
         # Update goal sim-anneal accept rate
-        self.sim_anneal_goal_acc_rate *= self.sim_anneal_goal_acc_rate_decay_factor
-        
         # Update agent temperature towards goal acc rate (if previous SA statistics exist)
-        self.agent.update_temp(self.sim_anneal_goal_acc_rate)
-        
         # Reset SA statistics
+        self.sim_anneal_goal_acc_rate *= self.sim_anneal_goal_acc_rate_decay_factor
+        self.agent.update_temp(self.sim_anneal_goal_acc_rate)
         self.agent.reset_annealing_statistics()
 
         # do this in a loop so we can truncate backprop in the recurrent encoder
@@ -233,10 +233,10 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         # data is (task, batch, feat) (and is not flattened later)
         obs, actions, rewards, next_obs, terms = self.sample_sac(indices)
         
-        for bouncegrad_it in range(self.bouncegrad_iterations):
+        for bouncegrad_it in trange(self.bouncegrad_iterations, desc="bouncegrad loop", leave=False):
             
             if bouncegrad_it != 0:
-                self.agent.anneal_graph_structure(context)
+                self.agent.anneal_graph_structure(context, train_annealing=True)
             
             # run inference in networks
             # Don't update graph structure in later iterations, instead we'll manually anneal

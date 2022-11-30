@@ -1,4 +1,5 @@
 from typing import Union
+from tqdm import trange, tqdm
 import numpy as np
 import torch
 from torch import nn as nn
@@ -71,7 +72,8 @@ class Graph_PEARLAgent(nn.Module):
         
         self.gnn_node_count = kwargs['gnn_node_count']
         self.gnn_edge_types = kwargs['gnn_edge_types']
-        self.sim_anneal_proposals = kwargs['sim_anneal_proposals']
+        self.sim_anneal_train_proposals = kwargs['sim_anneal_train_proposals']
+        self.sim_anneal_eval_proposals = kwargs['sim_anneal_eval_proposals']
         self.sim_anneal_temp = kwargs['sim_anneal_init_temp']
 
         self.context_vector_encoder = context_vector_encoder # (context -> z_means, z_vars)
@@ -164,7 +166,7 @@ class Graph_PEARLAgent(nn.Module):
         
         return vector_kl_div_sum, graph_kl_div_sum
 
-    def infer_posterior(self, context, update_graph_structure=True):
+    def infer_posterior(self, context, update_graph_structure=True, train_annealing=False):
         # Package context components for probabilistic encoders, which takes flattened vec inputs
         if self.use_next_obs_in_context:
             packed_context = torch.cat(context[:-1], dim=2)
@@ -203,7 +205,7 @@ class Graph_PEARLAgent(nn.Module):
         
         if update_graph_structure:
             self.sample_graph()
-            self.anneal_graph_structure(context)
+            self.anneal_graph_structure(context, train_annealing=train_annealing)
 
     def sample_z(self):
         if self.use_ib:
@@ -258,7 +260,7 @@ class Graph_PEARLAgent(nn.Module):
         return q_loss_per_task
                 
     @torch.no_grad()
-    def anneal_graph_structure(self, context):
+    def anneal_graph_structure(self, context, train_annealing = False):
         num_tasks = self.z.size(0)
         
         # TODO: See if there is efficiency increase from only changing the edge dict in each annealing step,
@@ -268,7 +270,11 @@ class Graph_PEARLAgent(nn.Module):
         all_structure_losses = [curr_structure_loss]
         all_proposed_structure_losses = []
         #print(f"Orig Structure Loss: {curr_structure_loss.tolist()}")
-        for step in range(self.sim_anneal_proposals):
+        if train_annealing:
+            proposal_count = self.sim_anneal_train_proposals
+        else:
+            proposal_count = self.sim_anneal_eval_proposals
+        for step in trange(proposal_count, desc="annealing", leave=False):
             node_i = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
             node_j = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
             
@@ -339,7 +345,7 @@ class Graph_PEARLAgent(nn.Module):
 
     # Assumes latent and graph structure have been inferred from context and sampled already
     def forward(self, obs, context, update_graph_structure=True):
-        self.infer_posterior(context, update_graph_structure=update_graph_structure)
+        self.infer_posterior(context, update_graph_structure=update_graph_structure, train_annealing=True)
         
         t, b, _ = obs.size()
         state = obs
