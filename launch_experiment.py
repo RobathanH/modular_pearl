@@ -32,21 +32,22 @@ def experiment(variant):
     # instantiate networks
     if variant['graph_pearl']:
         assert variant['algo_params']['use_information_bottleneck'], "Only implemented for info bottleneck enabled"
-        from graph_pearl import Node, GraphModule, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
+        from graph_pearl import GraphModule, Graph_TanhGaussianPolicy, Graph_PEARLAgent, Graph_PEARLSoftActorCritic
         
-        inner_node_count = variant['algo_params']['inner_node_count']
-        inner_edge_types = variant['algo_params']['inner_edge_types']
-        inner_dim = variant['algo_params']['inner_dim']
-        graph_conv_iterations = variant['algo_params']['graph_conv_iterations']
+        gnn_node_count = variant['algo_params']['gnn_node_count']
+        gnn_edge_types = variant['algo_params']['gnn_edge_types']
+        pre_gnn_fc_layers = variant['algo_params']['pre_gnn_fc_layers']
+        gnn_layers = variant['algo_params']['gnn_layers']
+        post_gnn_fc_layers = variant['algo_params']['post_gnn_fc_layers']
         
         latent_dim = variant['latent_size']
+        net_size = variant['net_size']
+        
+        encoder_model = RecurrentEncoder if variant['algo_params']['recurrent'] else MlpEncoder
         context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
         context_vector_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
         if latent_dim == 0:
             context_vector_encoder_output_dim = 2
-        net_size = variant['net_size']
-        recurrent = variant['algo_params']['recurrent']
-        encoder_model = RecurrentEncoder if recurrent else MlpEncoder
         
         context_vector_encoder = encoder_model(
             hidden_sizes=[200, 200, 200],
@@ -56,36 +57,55 @@ def experiment(variant):
         context_graph_encoder = encoder_model(
             hidden_sizes=[200, 200, 200],
             input_size=context_encoder_input_dim,
-            output_size=(inner_node_count**2) * inner_edge_types
+            output_size=(gnn_node_count**2) * gnn_edge_types
         )
+        
+        
+        
+        def get_layer_size_list(arg):
+            if isinstance(arg, int):
+                return [net_size] * arg
+            elif isinstance(arg, list):
+                return arg
+            else:
+                raise NotImplementedError
+        
+        gnn_layer_sizes = get_layer_size_list(gnn_layers)
+        pre_gnn_layer_sizes = get_layer_size_list(pre_gnn_fc_layers)
+        post_gnn_layer_sizes = get_layer_size_list(post_gnn_fc_layers)
+        
         qf1 = GraphModule(
-            input_dim=obs_dim + action_dim + latent_dim,
-            output_dim=1,
-            node_dim=inner_dim,
-            graph_conv_iterations=graph_conv_iterations,
-            node_edge_types=inner_edge_types
+            input_size=obs_dim + action_dim + latent_dim,
+            output_size=1,
+            gnn_edge_types=gnn_edge_types,
+            gnn_layer_sizes=gnn_layer_sizes,
+            pre_gnn_layer_sizes=pre_gnn_layer_sizes,
+            post_gnn_layer_sizes=post_gnn_layer_sizes
         )
         qf2 = GraphModule(
-            input_dim=obs_dim + action_dim + latent_dim,
-            output_dim=1,
-            node_dim=inner_dim,
-            graph_conv_iterations=graph_conv_iterations,
-            node_edge_types=inner_edge_types
+            input_size=obs_dim + action_dim + latent_dim,
+            output_size=1,
+            gnn_edge_types=gnn_edge_types,
+            gnn_layer_sizes=gnn_layer_sizes,
+            pre_gnn_layer_sizes=pre_gnn_layer_sizes,
+            post_gnn_layer_sizes=post_gnn_layer_sizes
         )
         vf = GraphModule(
-            input_dim=obs_dim + latent_dim,
-            output_dim=1,
-            node_dim=inner_dim,
-            graph_conv_iterations=graph_conv_iterations,
-            node_edge_types=inner_edge_types
+            input_size=obs_dim + latent_dim,
+            output_size=1,
+            gnn_edge_types=gnn_edge_types,
+            gnn_layer_sizes=gnn_layer_sizes,
+            pre_gnn_layer_sizes=pre_gnn_layer_sizes,
+            post_gnn_layer_sizes=post_gnn_layer_sizes
         )
         policy = Graph_TanhGaussianPolicy(
-            inner_dim,
-            inner_edge_types,
-            graph_conv_iterations,
             obs_dim,
             latent_dim,
-            action_dim
+            action_dim,
+            gnn_edge_types=gnn_edge_types,
+            gnn_layer_sizes=gnn_layer_sizes,
+            pre_gnn_layer_sizes=pre_gnn_layer_sizes,
+            post_gnn_layer_sizes=post_gnn_layer_sizes
         )
         agent = Graph_PEARLAgent(
             latent_dim,

@@ -384,14 +384,18 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
             for r in range(self.num_evals):
                 paths = self.collect_paths(idx, epoch, r)
                 all_rets.append([eval_util.get_average_returns([p]) for p in paths])
-            final_returns.append(np.mean([a[-1] for a in all_rets]))
+            #final_returns.append(np.mean([a[-1] for a in all_rets]))
+            final_returns.append(np.array([a[-1] for a in all_rets]))
             # record online returns for the first n trajectories
             n = min([len(a) for a in all_rets])
             all_rets = [a[:n] for a in all_rets]
-            all_rets = np.mean(np.stack(all_rets), axis=0) # avg return per nth rollout
-            online_returns.append(all_rets)
-        n = min([len(t) for t in online_returns])
-        online_returns = [t[:n] for t in online_returns]
+            #all_rets = np.mean(np.stack(all_rets), axis=0) # avg return per nth rollout
+            online_returns.append(np.array(all_rets))
+        n = min([t.shape[1] for t in online_returns])
+        online_returns = [t[:, :n] for t in online_returns]
+        
+        final_returns = np.array(final_returns)
+        online_returns = np.array(online_returns)
         return final_returns, online_returns
 
     def evaluate(self, epoch):
@@ -437,13 +441,13 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         ### eval train tasks with on-policy data to match eval of test tasks
         train_final_returns, train_online_returns = self._do_eval(indices, epoch)
         eval_util.dprint('train online returns')
-        eval_util.dprint(train_online_returns)
+        eval_util.dprint(train_online_returns.mean(axis=1))
 
         ### test tasks
         eval_util.dprint('evaluating on {} test tasks'.format(len(self.eval_tasks)))
         test_final_returns, test_online_returns = self._do_eval(self.eval_tasks, epoch)
         eval_util.dprint('test online returns')
-        eval_util.dprint(test_online_returns)
+        eval_util.dprint(test_online_returns.mean(axis=1))
 
         # save the final posterior
         self.agent.log_diagnostics(self.eval_statistics)
@@ -453,13 +457,40 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
 
         avg_train_return = np.mean(train_final_returns)
         avg_test_return = np.mean(test_final_returns)
-        avg_train_online_return = np.mean(np.stack(train_online_returns), axis=0)
-        avg_test_online_return = np.mean(np.stack(test_online_returns), axis=0)
+        avg_train_online_return = np.mean(train_online_returns, axis=(0,1))
+        avg_test_online_return = np.mean(test_online_returns, axis=(0,1))
         self.eval_statistics['AverageTrainReturn_all_train_tasks'] = train_returns
         self.eval_statistics['AverageReturn_all_train_tasks'] = avg_train_return
         self.eval_statistics['AverageReturn_all_test_tasks'] = avg_test_return
         logger.save_extra_data(avg_train_online_return, path='online-train-epoch{}'.format(epoch))
         logger.save_extra_data(avg_test_online_return, path='online-test-epoch{}'.format(epoch))
+        
+        # Save average returns per task index
+        for task_ind in np.unique(indices):
+            self.eval_statistics[f'Train Return Mean (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].mean()
+            self.eval_statistics[f'Train Return Max (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].max()
+        for task_ind in self.eval_tasks:
+            self.eval_statistics[f'Test Return Mean (Task {task_ind})'] = test_final_returns[task_ind].mean()
+            self.eval_statistics[f'Test Return Max (Task {task_ind})'] = test_final_returns[task_ind].max()
+        
+        '''
+        self.eval_statistics['Train Task Average Returns'] = {
+            task_ind: np.array(train_final_returns)[(indices == task_ind).nonzero()[0]].mean()
+            for task_ind in np.unique(indices)
+        }
+        self.eval_statistics['Train Task Max Returns'] = {
+            task_ind: np.array(train_final_returns)[(indices == task_ind).nonzero()[0]].max()
+            for task_ind in np.unique(indices)
+        }
+        self.eval_statistics['Test Task Average Returns'] = {
+            task_ind: np.array(test_final_returns)[(indices == task_ind).nonzero()[0]].mean()
+            for task_ind in self.eval_tasks
+        }
+        self.eval_statistics['Test Task Max Returns'] = {
+            task_ind: np.array(test_final_returns)[(indices == task_ind).nonzero()[0]].max()
+            for task_ind in self.eval_tasks
+        }
+        '''
 
         for key, value in self.eval_statistics.items():
             logger.record_tabular(key, value)

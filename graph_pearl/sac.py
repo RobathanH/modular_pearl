@@ -24,14 +24,15 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             latent_dim,
             agent,
 
-            inner_node_count=3,
-            inner_edge_types=2,
-            inner_dim=200,
-            graph_conv_iterations=4,
+            gnn_node_count=3,
+            gnn_edge_types=2,
+            pre_gnn_fc_layers=0,
+            gnn_layers=3,
+            post_gnn_fc_layers=0,
             context_graph_lr=1e-3,
-            sim_anneal_proposals=10,
             bouncegrad_iterations=10,
             graph_kl_lambda=0.1,
+            sim_anneal_proposals=10,
             sim_anneal_init_temp=1E-4,
             sim_anneal_init_goal_acc_rate=0.3,
             sim_anneal_final_goal_acc_rate=2E-3,
@@ -67,9 +68,8 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         # graph structure latent is used
         self.disable_vector_latent = (latent_dim == 0)
         
-        self.inner_node_count = inner_node_count
-        self.inner_edge_types = inner_edge_types
-        self.inner_dim = inner_dim
+        self.gnn_node_count = gnn_node_count
+        self.gnn_edge_types = gnn_edge_types
         self.bouncegrad_iterations = bouncegrad_iterations
         self.graph_kl_lambda = graph_kl_lambda
         self.sim_anneal_init_goal_acc_rate = sim_anneal_init_goal_acc_rate
@@ -356,8 +356,10 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 policy_loss
             ))
             self.eval_statistics['Context Graph Encoder Loss'] = ptu.get_numpy(context_graph_loss)
-            self.eval_statistics['Train Task Indices'] = indices
-            self.eval_statistics['Context Graph Structure'] = ptu.get_numpy(graph_structure)
+            self.eval_statistics['Context Graph Structures'] = {
+                task_ind: ptu.get_numpy(graph_structure[(indices == task_ind).nonzero()])
+                for task_ind in np.unique(indices)
+            }
             self.eval_statistics['SA Goal Accept Rate'] = self.sim_anneal_goal_acc_rate
             
             self.eval_statistics.update(create_stats_ordered_dict(

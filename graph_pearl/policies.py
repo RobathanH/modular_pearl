@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, List
 import numpy as np
 import torch
 from torch import nn as nn
@@ -37,29 +37,32 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
 
     def __init__(
             self,
-            inner_node_dim: int,
-            inner_node_edges: int,
-            conv_iterations: int,
             state_dim: int,
             latent_dim: int,
-            action_dim: int
+            action_dim: int,
+            gnn_edge_types: int,
+            gnn_layer_sizes: List[int],
+            pre_gnn_layer_sizes: List[int] = [],
+            post_gnn_layer_sizes: List[int] = []
     ):
         self.save_init_params(locals())
         super().__init__()
         
-        self.inner_node_dim = inner_node_dim
-        self.inner_node_edges = inner_node_edges
-        self.conv_iterations = conv_iterations
         self.state_dim = state_dim
         self.latent_dim = latent_dim
         self.action_dim = action_dim
+        self.gnn_edge_types = gnn_edge_types
+        self.gnn_layer_sizes = gnn_layer_sizes
+        self.pre_gnn_layer_sizes = pre_gnn_layer_sizes
+        self.post_gnn_layer_sizes = post_gnn_layer_sizes
         
         self.module = GraphModule(
-            input_dim=state_dim + latent_dim,
-            output_dim=2 * action_dim,
-            node_dim=inner_node_dim,
-            graph_conv_iterations=conv_iterations,
-            node_edge_types=inner_node_edges
+            input_size=state_dim + latent_dim,
+            output_size=2 * action_dim,
+            gnn_edge_types=gnn_edge_types,
+            gnn_layer_sizes=gnn_layer_sizes,
+            pre_gnn_layer_sizes=pre_gnn_layer_sizes,
+            post_gnn_layer_sizes=post_gnn_layer_sizes
         )
 
     def get_action(self, state: torch.Tensor, latent: Optional[torch.Tensor], graph_structure: torch.Tensor, deterministic: bool = False):
