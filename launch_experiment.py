@@ -28,6 +28,8 @@ def experiment(variant):
     obs_dim = int(np.prod(env.observation_space.shape))
     action_dim = int(np.prod(env.action_space.shape))
     reward_dim = 1
+    
+    print("obs_dim:", obs_dim, "\naction_dim:", action_dim)
 
     # instantiate networks
     if variant['graph_pearl']:
@@ -141,6 +143,27 @@ def experiment(variant):
     
     
     else:
+        # Remove non-graph-pearl algo_params
+        graph_only_algo_params = [
+            "gnn_node_count",
+            "gnn_edge_types",
+            "pre_gnn_fc_layers",
+            "gnn_layers",
+            "post_gnn_fc_layers",
+            "bouncegrad_iterations",
+            "context_graph_lr",
+            "graph_kl_lambda",
+            "sim_anneal_train_proposals",
+            "sim_anneal_eval_proposals",
+            "sim_anneal_init_temp",
+            "sim_anneal_init_goal_acc_rate",
+            "sim_anneal_final_goal_acc_rate",
+            "persistent_task_graph_structures"
+        ]
+        for key in graph_only_algo_params:
+            if key in variant['algo_params']:
+                del variant['algo_params'][key]
+        
         latent_dim = variant['latent_size']
         context_encoder_input_dim = 2 * obs_dim + action_dim + reward_dim if variant['algo_params']['use_next_obs_in_context'] else obs_dim + action_dim + reward_dim
         context_encoder_output_dim = latent_dim * 2 if variant['algo_params']['use_information_bottleneck'] else latent_dim
@@ -173,6 +196,7 @@ def experiment(variant):
             obs_dim=obs_dim + latent_dim,
             latent_dim=latent_dim,
             action_dim=action_dim,
+            init_w=1e-2
         )
         agent = PEARLAgent(
             latent_dim,

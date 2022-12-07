@@ -103,6 +103,7 @@ class Graph_PEARLAgent(nn.Module):
 
         self.clear_z()
 
+    #@profile
     def clear_z(self, num_tasks=1):
         '''
         reset q(z|c) to the prior
@@ -134,6 +135,7 @@ class Graph_PEARLAgent(nn.Module):
         if self.recurrent:
             self.context_vector_encoder.hidden = self.context_vector_encoder.hidden.detach()
 
+    #@profile
     def update_context(self, inputs):
         ''' append single transition to the current context '''
         o, a, r, no, d, info = inputs
@@ -151,22 +153,33 @@ class Graph_PEARLAgent(nn.Module):
         else:
             self.context = [torch.cat([context_component, new_component], dim=1) for context_component, new_component in zip(self.context, data)]
 
+    #@profile
     def compute_kl_div(self):
         ''' compute KL( q(z|c) || r(z) ) '''
+        '''
         vector_prior = torch.distributions.Normal(ptu.zeros(self.latent_dim), ptu.ones(self.latent_dim))
         vector_posteriors = [torch.distributions.Normal(mu, torch.sqrt(var)) for mu, var in zip(torch.unbind(self.z_means), torch.unbind(self.z_vars))]
         vector_kl_divs = [torch.distributions.kl.kl_divergence(post, vector_prior) for post in vector_posteriors]
         vector_kl_div_sum = torch.sum(torch.stack(vector_kl_divs))
+        '''
+        # Closed-form KL-divergence against unit prior
+        vector_kl_div_per_dim = 0.5 * (-torch.log(self.z_vars) - 1 + torch.square(self.z_means) + self.z_vars).sum(dim=-1)
+        vector_kl_div_sum = vector_kl_div_per_dim.sum()
         
         ''' compute categorical KL div for graph latent encoder '''
+        '''
         graph_prior = torch.distributions.Categorical(ptu.ones(self.gnn_edge_types) / self.gnn_edge_types)
         graph_posteriors = [torch.distributions.Categorical(edge_probs) for edge_probs in torch.unbind(self.graph_structure_probs.view(-1, self.gnn_edge_types))]
         graph_kl_divs = [torch.distributions.kl.kl_divergence(post, graph_prior) for post in graph_posteriors]
         graph_kl_div_sum = torch.sum(torch.stack(graph_kl_divs))
+        '''
+        graph_kl_divs = (self.graph_structure_probs * (self.gnn_edge_types * self.graph_structure_probs + 1e-9).log()).sum(dim=-1)
+        graph_kl_div_sum = graph_kl_divs.sum()
         
         return vector_kl_div_sum, graph_kl_div_sum
 
-    def infer_posterior(self, context, update_graph_structure=True, train_annealing=False):
+    #@profile
+    def infer_posterior(self, context, sample_graph=True, anneal_graph=True, train_annealing=False):
         # Package context components for probabilistic encoders, which takes flattened vec inputs
         if self.use_next_obs_in_context:
             packed_context = torch.cat(context[:-1], dim=2)
@@ -203,19 +216,27 @@ class Graph_PEARLAgent(nn.Module):
         graph_edge_prob_logits = graph_edge_prob_logits.sum(dim=1)
         self.graph_structure_probs = F.softmax(graph_edge_prob_logits, dim=-1)
         
-        if update_graph_structure:
+        if sample_graph:
             self.sample_graph()
+        if anneal_graph:
             self.anneal_graph_structure(context, train_annealing=train_annealing)
 
+    #@profile
     def sample_z(self):
         if self.use_ib:
+            '''
             posteriors = [torch.distributions.Normal(m, torch.sqrt(s)) for m, s in zip(torch.unbind(self.z_means), torch.unbind(self.z_vars))]
             z = [d.rsample() for d in posteriors]
             self.z = torch.stack(z)
+            '''
+            flat_posterior = torch.distributions.Normal(self.z_means.flatten(), torch.sqrt(self.z_vars.flatten()))
+            flat_z = flat_posterior.rsample()
+            self.z = flat_z.reshape(self.z_means.shape)
         else:
             self.z = self.z_means
-            
+           
     @torch.no_grad()
+    #@profile
     def sample_graph(self):
         # Use Structure Proposal probabilistically
         if self.use_ib:
@@ -227,8 +248,9 @@ class Graph_PEARLAgent(nn.Module):
         # Use structure proposal deterministically
         else:
             self.graph_structure = self.graph_structure_probs.detach().argmax(dim=-1)
-                
+       
     @torch.no_grad()
+    #@profile
     def graph_structure_loss(self, context, proposed_graph_structure):
         context_obs, context_act, context_r, context_next_obs, context_terms = context
         
@@ -258,8 +280,9 @@ class Graph_PEARLAgent(nn.Module):
             (1. - context_terms) * self.discount * v_pred
         q_loss_per_task = torch.mean((q1_pred - q_target) ** 2, dim=[1,2]) + torch.mean((q2_pred - q_target) ** 2, dim=[1,2])
         return q_loss_per_task
-                
-    @torch.no_grad()
+               
+    @torch.no_grad() 
+    #@profile
     def anneal_graph_structure(self, context, train_annealing = False):
         num_tasks = self.z.size(0)
         
@@ -274,17 +297,18 @@ class Graph_PEARLAgent(nn.Module):
             proposal_count = self.sim_anneal_train_proposals
         else:
             proposal_count = self.sim_anneal_eval_proposals
-        for step in trange(proposal_count, desc="annealing", leave=False):
+        for step in trange(proposal_count, desc="annealing", leave=False, delay=0.5):
             node_i = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
             node_j = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
             
             # Get probabilities for each chosen node-pair from graph structure encoder,
             proposal_edge_type_probs = self.graph_structure_probs[torch.arange(num_tasks), node_i, node_j].detach().clone()
-            
+            proposal_edge_type_probs += 1e-5 # to avoid any zero-weight errors in multinomial if all prob is at current edge
+
             # then zero-out probability for current edge type (so proposal is definitely different from current)
             curr_edge_types = self.graph_structure[torch.arange(num_tasks), node_i, node_j]
             proposal_edge_type_probs[torch.arange(num_tasks), curr_edge_types] = 0
-            
+
             # Sample proposal edge types from graph structure encoder edge-type distribution
             proposal_edge_types = torch.multinomial(proposal_edge_type_probs, num_samples=1)[:, 0]
             
@@ -324,6 +348,7 @@ class Graph_PEARLAgent(nn.Module):
         #print(f"Proposed Structure Loss Std: {torch.std(torch.vstack(all_proposed_structure_losses), dim=0)}")
 
     @torch.no_grad()
+    #@profile
     def get_action(self, obs, deterministic=False):
         ''' sample action from the policy, conditioned on the task embedding '''
         state = ptu.from_numpy(obs[None, None])
@@ -344,8 +369,9 @@ class Graph_PEARLAgent(nn.Module):
         self.policy.set_num_steps_total(n)
 
     # Assumes latent and graph structure have been inferred from context and sampled already
-    def forward(self, obs, context, update_graph_structure=True):
-        self.infer_posterior(context, update_graph_structure=update_graph_structure, train_annealing=True)
+    #@profile
+    def forward(self, obs, context, sample_graph=True, anneal_graph=True):
+        self.infer_posterior(context, sample_graph=sample_graph, anneal_graph=anneal_graph, train_annealing=True)
         
         t, b, _ = obs.size()
         state = obs

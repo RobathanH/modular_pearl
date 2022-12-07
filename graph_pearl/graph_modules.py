@@ -185,6 +185,7 @@ class GraphModule(PyTorchModule):
             fc_out_layer_list.append(nn.Linear(in_size, out_size))
         self.fc_out = nn.Sequential(*fc_out_layer_list)
         
+    #@profile
     def forward(self, *input_features: torch.Tensor, graph_structure: torch.Tensor) -> torch.Tensor:
         """_summary_
 

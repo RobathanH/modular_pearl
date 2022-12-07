@@ -1,6 +1,7 @@
 import numpy as np
 
 from rlkit.data_management.simple_replay_buffer import SimpleReplayBuffer
+from rlkit.data_management.disk_replay_buffer import DiskReplayBuffer
 from gymnasium.spaces import Box, Discrete, Tuple
 
 
@@ -10,6 +11,7 @@ class MultiTaskReplayBuffer(object):
             max_replay_buffer_size,
             env,
             tasks,
+            use_disk=False
     ):
         """
         :param max_replay_buffer_size:
@@ -19,7 +21,9 @@ class MultiTaskReplayBuffer(object):
         self.env = env
         self._ob_space = env.observation_space
         self._action_space = env.action_space
-        self.task_buffers = dict([(idx, SimpleReplayBuffer(
+        
+        buffer_class = SimpleReplayBuffer if not use_disk else DiskReplayBuffer
+        self.task_buffers = dict([(idx, buffer_class(
             max_replay_buffer_size=max_replay_buffer_size,
             observation_dim=get_dim(self._ob_space),
             action_dim=get_dim(self._action_space),

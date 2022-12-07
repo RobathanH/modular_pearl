@@ -5,6 +5,7 @@ import time
 import gtimer as gt
 import numpy as np
 from tqdm import trange, tqdm
+import os
 
 from rlkit.core import logger, eval_util
 from rlkit.data_management.env_replay_buffer import MultiTaskReplayBuffer
@@ -31,6 +32,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
             num_evals=10,
             num_steps_per_eval=1000,
             batch_size=1024,
+            mini_batch_size=None,
             embedding_batch_size=1024,
             embedding_mini_batch_size=1024,
             max_path_length=1000,
@@ -47,6 +49,9 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
             render_eval_paths=False,
             dump_eval_paths=False,
             plotter=None,
+            
+            disk_replay_buffer=False,
+            render_rollouts=False
     ):
         """
         :param env: training env
@@ -72,6 +77,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         self.num_evals = num_evals
         self.num_steps_per_eval = num_steps_per_eval
         self.batch_size = batch_size
+        self.mini_batch_size = mini_batch_size or batch_size
         self.embedding_batch_size = embedding_batch_size
         self.embedding_mini_batch_size = embedding_mini_batch_size
         self.max_path_length = max_path_length
@@ -90,6 +96,11 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         self.render_eval_paths = render_eval_paths
         self.dump_eval_paths = dump_eval_paths
         self.plotter = plotter
+        
+        self.render_rollouts = render_rollouts
+        if render_rollouts and not (hasattr(self.env, "begin_render") and hasattr(self.env, "save_render")):
+            print("Disabling algo_params.render_rollouts because env doesn't support it")
+            self.render_rollouts = False
 
         self.sampler = InPlacePathSampler(
             env=env,
@@ -104,12 +115,14 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
                 self.replay_buffer_size,
                 env,
                 self.train_tasks,
+                use_disk=disk_replay_buffer
             )
 
         self.enc_replay_buffer = MultiTaskReplayBuffer(
                 self.replay_buffer_size,
                 env,
                 self.train_tasks,
+                use_disk=disk_replay_buffer
         )
 
         self._n_env_steps_total = 0
@@ -159,7 +172,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
             if it_ == 0:
                 print('collecting initial pool of data for train and eval')
                 # temp for evaluating
-                for idx in self.train_tasks:
+                for idx in tqdm(self.train_tasks, desc="initial train data collection"):
                     self.task_idx = idx
                     self.env.reset_task(idx)
                     self.collect_data(self.num_initial_steps, 1, np.inf)
@@ -379,13 +392,31 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         return paths
 
     def _do_eval(self, indices, epoch):
+        render_count = {task_type: 0 for task_type in self.env.task_types.keys()}
         final_returns = []
         online_returns = []
         for idx in indices:
             all_rets = []
             for r in range(self.num_evals):
+
+                # Begin Render periodically
+                if self.render_rollouts and \
+                (epoch < 10 or epoch % 5 == 0) and \
+                (r == 0) and (render_count[self.env.task_idx_to_type[idx]] < 1):
+                    render_count[self.env.task_idx_to_type[idx]] += 1
+                    self.env.begin_render()
+                    
                 paths = self.collect_paths(idx, epoch, r)
                 all_rets.append([eval_util.get_average_returns([p]) for p in paths])
+                
+                # Save rendered rollouts if they exist
+                if self.render_rollouts:
+                    self.env.save_render(
+                        video_folder=os.path.join(logger._snapshot_dir, "rollouts", f"epoch_{epoch}"),
+                        file_prefix=f"{idx:03d}-{self.env.task_idx_to_type[idx]}",
+                        episode_index=r
+                    )
+                    
             #final_returns.append(np.mean([a[-1] for a in all_rets]))
             final_returns.append(np.array([a[-1] for a in all_rets]))
             # record online returns for the first n trajectories
@@ -420,7 +451,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         eval_util.dprint('evaluating on {} train tasks'.format(len(indices)))
         ### eval train tasks with posterior sampled from the training replay buffer
         train_returns = []
-        for idx in indices:
+        for idx in tqdm(indices, desc="train rollouts (offline context)", leave=False, delay=0.5):
             self.task_idx = idx
             self.env.reset_task(idx)
             paths = []
@@ -441,13 +472,14 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
             train_returns.append(eval_util.get_average_returns(paths))
         train_returns = np.mean(train_returns)
         ### eval train tasks with on-policy data to match eval of test tasks
-        train_final_returns, train_online_returns = self._do_eval(indices, epoch)
+        train_final_returns, train_online_returns = self._do_eval(tqdm(indices, desc="train rollouts (online context)", leave=False, delay=0.5), epoch)
         eval_util.dprint('train online returns')
         eval_util.dprint(train_online_returns.mean(axis=1))
 
         ### test tasks
         eval_util.dprint('evaluating on {} test tasks'.format(len(self.eval_tasks)))
-        test_final_returns, test_online_returns = self._do_eval(self.eval_tasks, epoch)
+        shuffled_eval_tasks = np.random.permutation(self.eval_tasks)
+        test_final_returns, test_online_returns = self._do_eval(tqdm(shuffled_eval_tasks, desc="test rollouts (online context)", leave=False, delay=0.5), epoch)
         eval_util.dprint('test online returns')
         eval_util.dprint(test_online_returns.mean(axis=1))
 
@@ -467,31 +499,34 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         logger.save_extra_data(avg_train_online_return, path='online-train-epoch{}'.format(epoch))
         logger.save_extra_data(avg_test_online_return, path='online-test-epoch{}'.format(epoch))
         
-        # Save average returns per task index
-        self.eval_statistics['Train Task Return Mean'] = {
-            task_ind: train_final_returns[(indices == task_ind).nonzero()].mean()
-            for task_ind in np.unique(indices)
-        }
-        self.eval_statistics['Train Task Return Max'] = {
-            task_ind: train_final_returns[(indices == task_ind).nonzero()].max()
-            for task_ind in np.unique(indices)
-        }
-        self.eval_statistics['Test Task Return Mean'] = {
-            task_ind: test_final_returns[task_ind].mean()
-            for task_ind in self.eval_tasks
-        }
-        self.eval_statistics['Test Task Return Max'] = {
-            task_ind: test_final_returns[task_ind].max()
-            for task_ind in self.eval_tasks
-        }
-        '''
-        for task_ind in np.unique(indices):
-            self.eval_statistics[f'Train Return Mean (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].mean()
-            self.eval_statistics[f'Train Return Max (Task {task_ind})'] = train_final_returns[(indices == task_ind).nonzero()].max()
-        for task_ind in self.eval_tasks:
-            self.eval_statistics[f'Test Return Mean (Task {task_ind})'] = test_final_returns[task_ind].mean()
-            self.eval_statistics[f'Test Return Max (Task {task_ind})'] = test_final_returns[task_ind].max()
-        '''
+        # Save average returns per task type
+        if hasattr(self.env, "task_types"):
+            for task_type, task_indices in self.env.task_types.items():
+                train_task_indices = np.isin(indices, task_indices).nonzero()
+                self.eval_statistics[f'Train Return Mean ({task_type})'] = train_final_returns[train_task_indices].mean()
+                test_task_indices = np.array([
+                    i for i, task_idx in enumerate(shuffled_eval_tasks)
+                    if task_idx in task_indices
+                ])
+                self.eval_statistics[f'Test Return Mean ({task_type})'] = test_final_returns[test_task_indices].mean()
+            '''
+            for task_type, task_indices in self.env.task_types.items():
+                train_task_indices = np.isin(indices, task_indices).nonzero()
+                self.eval_statistics[f'Train Return Max ({task_type})'] = train_final_returns[train_task_indices].max()
+                test_task_indices = np.array([
+                    i for i in range(len(self.eval_tasks))
+                    if len(self.env.tasks) - len(self.eval_tasks) + i in task_indices
+                ])
+                self.eval_statistics[f'Test Return Max ({task_type})'] = test_final_returns[test_task_indices].max()
+            '''
+        
+        else:
+            self.eval_statistics['Train Return Mean'] = train_final_returns.mean()
+            self.eval_statistics['Test Return Mean'] = test_final_returns.mean()
+            '''
+            self.eval_statistics['Train Return Max'] = train_final_returns.max()
+            self.eval_statistics['Test Return Max'] = test_final_returns.max()
+            '''
 
         for key, value in self.eval_statistics.items():
             logger.record_tabular(key, value)

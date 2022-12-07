@@ -5,7 +5,7 @@ from rlkit.data_management.replay_buffer import ReplayBuffer
 
 class SimpleReplayBuffer(ReplayBuffer):
     def __init__(
-            self, max_replay_buffer_size, observation_dim, action_dim,
+            self, max_replay_buffer_size, observation_dim, action_dim
     ):
         self._observation_dim = observation_dim
         self._action_dim = action_dim

@@ -7,7 +7,8 @@ from . import register_env
 # Copy task structure from https://github.com/jonasrothfuss/ProMP/blob/master/meta_policy_search/envs/mujoco_envs/ant_rand_goal.py
 @register_env('ant-goal')
 class AntGoalEnv(MultitaskAntEnv):
-    def __init__(self, task={}, n_tasks=2, randomize_tasks=True, **kwargs):
+    def __init__(self, task={}, n_tasks=2, contact_force_in_obs=True, randomize_tasks=True, **kwargs):
+        self.contact_force_in_obs = contact_force_in_obs
         super(AntGoalEnv, self).__init__(task, n_tasks, **kwargs)
 
     def step(self, action):
@@ -40,8 +41,14 @@ class AntGoalEnv(MultitaskAntEnv):
         return tasks
 
     def _get_obs(self):
-        return np.concatenate([
-            self.sim.data.qpos.flat,
-            self.sim.data.qvel.flat,
-            np.clip(self.sim.data.cfrc_ext, -1, 1).flat,
-        ])
+        if self.contact_force_in_obs:
+            return np.concatenate([
+                self.sim.data.qpos.flat,
+                self.sim.data.qvel.flat,
+                np.clip(self.sim.data.cfrc_ext, -1, 1).flat,
+            ])
+        else:
+            return np.concatenate([
+                self.sim.data.qpos.flat,
+                self.sim.data.qvel.flat,
+            ])

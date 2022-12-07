@@ -11,7 +11,7 @@ from rlkit.torch.core import PyTorchModule
 from rlkit.torch.core import np_ify
 
 from .graph_utils import Node
-from .graph_modules import GraphModule
+from .hetero_graph_modules import GraphModule
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -74,6 +74,7 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
         outputs = self.forward(state, latent, graph_structure, deterministic=deterministic)[0]
         return np_ify(outputs)
 
+    #@profile
     def forward(
             self,
             state: torch.Tensor,
@@ -88,7 +89,8 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
         :param deterministic: If True, do not sample
         :param return_log_prob: If True, return a sample and its log probability
         """
-        mean, log_std = torch.tensor_split(self.module(state, latent, graph_structure=graph_structure), 2, dim=-1)
+        network_out = self.module(state, latent, graph_structure=graph_structure)
+        mean, log_std = torch.tensor_split(network_out, 2, dim=-1)
         log_std = torch.clamp(log_std, LOG_SIG_MIN, LOG_SIG_MAX)
         std = torch.exp(log_std)
 

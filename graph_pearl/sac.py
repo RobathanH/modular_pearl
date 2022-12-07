@@ -1,4 +1,4 @@
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import numpy as np
 import gtimer as gt
 from tqdm import tqdm, trange
@@ -38,6 +38,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             sim_anneal_init_temp=1E-4,
             sim_anneal_init_goal_acc_rate=0.3,
             sim_anneal_final_goal_acc_rate=2E-3,
+            persistent_task_graph_structures=False,
 
             policy_lr=1e-3,
             qf_lr=1e-3,
@@ -77,6 +78,10 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         self.sim_anneal_init_goal_acc_rate = sim_anneal_init_goal_acc_rate
         self.sim_anneal_final_goal_acc_rate = sim_anneal_final_goal_acc_rate
         self.sim_anneal_goal_acc_rate_decay_factor = np.exp(np.log(sim_anneal_final_goal_acc_rate / sim_anneal_init_goal_acc_rate) / (kwargs['num_iterations'] * kwargs['num_train_steps_per_itr']))
+        if persistent_task_graph_structures:
+            self.persistent_task_graph_structures = ptu.zeros(len(train_tasks), gnn_node_count, gnn_node_count, dtype=torch.long)
+        else:
+            self.persistent_task_graph_structures = None
 
         self.soft_target_tau = soft_target_tau
         self.policy_mean_reg_weight = policy_mean_reg_weight
@@ -142,8 +147,11 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             device = ptu.device
         for net in self.networks:
             net.to(device)
+        if self.persistent_task_graph_structures is not None:
+            self.persistent_task_graph_structures = self.persistent_task_graph_structures.to(device)
 
     ##### Data handling #####
+    #@profile
     def unpack_batch(self, batch, sparse_reward=False):
         ''' unpack a batch and return individual elements '''
         o = batch['observations'][None, ...]
@@ -156,6 +164,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         t = batch['terminals'][None, ...]
         return [o, a, r, no, t]
 
+    #@profile
     def sample_sac(self, indices):
         ''' sample batch of training data from a list of tasks for training the actor-critic '''
         # this batch consists of transitions sampled randomly from replay buffer
@@ -167,6 +176,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         unpacked = [torch.cat(x, dim=0) for x in unpacked]
         return unpacked
 
+    #@profile
     def sample_context(self, indices):
         ''' sample batch of context from a list of tasks from the replay buffer '''
         # make method work given a single task index
@@ -184,6 +194,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         return obs, act, rewards, next_obs, terms
 
     ##### Training #####
+    #@profile
     def _do_training(self, indices):
         mb_size = self.embedding_mini_batch_size
         num_updates = self.embedding_batch_size // mb_size
@@ -212,6 +223,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             # stop backprop
             self.agent.detach_z()
 
+    #@profile
     def _min_q(self, obs, actions, latent, graph_structure):
         '''
         state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
@@ -224,114 +236,132 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         min_q = torch.min(q1, q2)
         return min_q
 
+    #@profile
     def _update_target_network(self):
         ptu.soft_update_from_to(self.vf, self.target_vf, self.soft_target_tau)
 
+    #@profile
     def _take_step(self, indices, context):
         num_tasks = len(indices)
+        
+        # Set agent to use persistent task graph structures if enabled
+        if self.persistent_task_graph_structures is not None:
+            self.agent.graph_structure = self.persistent_task_graph_structures[indices].clone()
 
         # data is (task, batch, feat) (and is not flattened later)
-        obs, actions, rewards, next_obs, terms = self.sample_sac(indices)
+        batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_terms = self.sample_sac(indices)
         
-        for bouncegrad_it in trange(self.bouncegrad_iterations, desc="bouncegrad loop", leave=False):
-            
-            if bouncegrad_it != 0:
-                self.agent.anneal_graph_structure(context, train_annealing=True)
-            
-            # run inference in networks
-            # Don't update graph structure in later iterations, instead we'll manually anneal
-            policy_outputs = self.agent(obs, context, update_graph_structure=(bouncegrad_it == 0))
-            new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
-            graph_structure = self.agent.graph_structure
-            
-            if self.disable_vector_latent:
-                latent = detached_latent = None
-            else:
-                latent = self.agent.z.unsqueeze(1).expand(-1, obs.size(1), -1)
-                detached_latent = latent.detach()
+        for i in trange(0, batch_obs.size(1), self.mini_batch_size, desc="minibatch", leave=False, delay=0.5):
 
-            # Q and V networks
-            # encoder will only get gradients from Q nets (through state_action_input)
-            '''
-            state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
-                                                graph_structure, obs, latent, action=actions)
-            q1_pred = self.qf1(state_action_input)
-            q2_pred = self.qf2(state_action_input)
-            state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
-                                        graph_structure, obs, latent.detach())
-            v_pred = self.vf(state_input)
-            # get targets for use in V and Q updates
-            with torch.no_grad():
-                next_state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
-                                            graph_structure, next_obs, latent)
-                target_v_values = self.target_vf(next_state_input)
-            '''
-            q1_pred = self.qf1(obs, actions, latent, graph_structure=graph_structure)
-            q2_pred = self.qf2(obs, actions, latent, graph_structure=graph_structure)
-            v_pred = self.vf(obs, detached_latent, graph_structure=graph_structure)
-            with torch.no_grad():
-                target_v_values = self.target_vf(next_obs, detached_latent, graph_structure=graph_structure)
-
-            # KL constraint on z if probabilistic
-            self.context_vector_optimizer.zero_grad()
-            self.context_graph_optimizer.zero_grad()
-            if self.use_information_bottleneck:
-                vector_kl_div, graph_kl_div = self.agent.compute_kl_div()
-                vector_kl_loss = self.kl_lambda * vector_kl_div
-                vector_kl_loss.backward(retain_graph=True)
+            obs = batch_obs[:, i : i + self.mini_batch_size]
+            actions = batch_actions[:, i : i + self.mini_batch_size]
+            rewards = batch_rewards[:, i : i + self.mini_batch_size]
+            next_obs = batch_next_obs[:, i : i + self.mini_batch_size]
+            terms = batch_terms[:, i : i + self.mini_batch_size]
+            
+            for bouncegrad_it in trange(self.bouncegrad_iterations, desc="bouncegrad loop", leave=False, delay=0.5):
                 
-                graph_kl_loss = self.graph_kl_lambda * graph_kl_div
-                graph_kl_loss.backward(retain_graph=True)
+                # Whether to sample task graph structures from scratch rather than retaining and annealing on existing graph structure
+                sample_graph = (self.persistent_task_graph_structures is None) and (bouncegrad_it == 0)
+                    
+                policy_outputs = self.agent(obs, context, sample_graph=sample_graph, anneal_graph=True)
+                new_actions, policy_mean, policy_log_std, log_pi = policy_outputs[:4]
+                graph_structure = self.agent.graph_structure
+                
+                if self.disable_vector_latent:
+                    latent = detached_latent = None
+                else:
+                    latent = self.agent.z.unsqueeze(1).expand(-1, obs.size(1), -1)
+                    detached_latent = latent.detach()
 
-            # qf and encoder update (note encoder does not get grads from policy or vf)
-            self.qf1_optimizer.zero_grad()
-            self.qf2_optimizer.zero_grad()
-            # scale rewards for Bellman update
-            q_target = rewards * self.reward_scale + (1. - terms) * self.discount * target_v_values
-            qf_loss = torch.mean((q1_pred - q_target) ** 2) + torch.mean((q2_pred - q_target) ** 2)
-            qf_loss.backward()
-            self.qf1_optimizer.step()
-            self.qf2_optimizer.step()
-            self.context_vector_optimizer.step()
-            
-            # Update context graph encoder to match results from sim annealing
-            #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types) * self.agent.graph_structure_probs.log())
-            context_graph_loss = F.cross_entropy((self.agent.graph_structure_probs + 1e-9).flatten(0, -2).log(), self.agent.graph_structure.flatten())
-            context_graph_loss.backward()
-            self.context_graph_optimizer.step()
+                # Q and V networks
+                # encoder will only get gradients from Q nets (through state_action_input)
+                '''
+                state_action_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                                    graph_structure, obs, latent, action=actions)
+                q1_pred = self.qf1(state_action_input)
+                q2_pred = self.qf2(state_action_input)
+                state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                            graph_structure, obs, latent.detach())
+                v_pred = self.vf(state_input)
+                # get targets for use in V and Q updates
+                with torch.no_grad():
+                    next_state_input = construct_graph(self.inner_node_count, self.inner_edge_types, self.inner_dim,
+                                                graph_structure, next_obs, latent)
+                    target_v_values = self.target_vf(next_state_input)
+                '''
+                q1_pred = self.qf1(obs, actions, latent, graph_structure=graph_structure)
+                q2_pred = self.qf2(obs, actions, latent, graph_structure=graph_structure)
+                v_pred = self.vf(obs, detached_latent, graph_structure=graph_structure)
+                with torch.no_grad():
+                    target_v_values = self.target_vf(next_obs, detached_latent, graph_structure=graph_structure)
 
-            # compute min Q on the new actions
-            min_q_new_actions = self._min_q(obs, new_actions, detached_latent, graph_structure)
+                # KL constraint on z if probabilistic
+                self.context_vector_optimizer.zero_grad()
+                self.context_graph_optimizer.zero_grad()
+                if self.use_information_bottleneck:
+                    vector_kl_div, graph_kl_div = self.agent.compute_kl_div()
+                    vector_kl_loss = self.kl_lambda * vector_kl_div
+                    vector_kl_loss.backward(retain_graph=True)
+                    
+                    graph_kl_loss = self.graph_kl_lambda * graph_kl_div
+                    graph_kl_loss.backward(retain_graph=True)
 
-            # vf update
-            v_target = min_q_new_actions - log_pi
-            vf_loss = self.vf_criterion(v_pred, v_target.detach())
-            self.vf_optimizer.zero_grad()
-            vf_loss.backward()
-            self.vf_optimizer.step()
-            self._update_target_network()
+                # qf and encoder update (note encoder does not get grads from policy or vf)
+                self.qf1_optimizer.zero_grad()
+                self.qf2_optimizer.zero_grad()
+                # scale rewards for Bellman update
+                q_target = rewards * self.reward_scale + (1. - terms) * self.discount * target_v_values
+                qf_loss = torch.mean((q1_pred - q_target) ** 2) + torch.mean((q2_pred - q_target) ** 2)
+                qf_loss.backward()
+                self.qf1_optimizer.step()
+                self.qf2_optimizer.step()
+                self.context_vector_optimizer.step()
+                
+                # Update context graph encoder to match results from sim annealing
+                #context_graph_loss = torch.sum(-1 * F.one_hot(self.agent.graph_structure, num_classes=self.inner_edge_types) * self.agent.graph_structure_probs.log())
+                context_graph_loss = F.cross_entropy((self.agent.graph_structure_probs + 1e-9).flatten(0, -2).log(), self.agent.graph_structure.flatten())
+                context_graph_loss.backward()
+                self.context_graph_optimizer.step()
 
-            # policy update
-            # n.b. policy update includes dQ/da
-            log_policy_target = min_q_new_actions
+                # compute min Q on the new actions
+                min_q_new_actions = self._min_q(obs, new_actions, detached_latent, graph_structure)
 
-            policy_loss = (
-                    log_pi - log_policy_target
-            ).mean()
+                # vf update
+                v_target = min_q_new_actions - log_pi
+                vf_loss = self.vf_criterion(v_pred, v_target.detach())
+                self.vf_optimizer.zero_grad()
+                vf_loss.backward()
+                self.vf_optimizer.step()
+                self._update_target_network()
 
-            mean_reg_loss = self.policy_mean_reg_weight * (policy_mean**2).mean()
-            std_reg_loss = self.policy_std_reg_weight * (policy_log_std**2).mean()
-            pre_tanh_value = policy_outputs[-1]
-            pre_activation_reg_loss = self.policy_pre_activation_weight * (
-                (pre_tanh_value**2).sum(dim=2).mean()
-            )
-            policy_reg_loss = mean_reg_loss + std_reg_loss + pre_activation_reg_loss
-            policy_loss = policy_loss + policy_reg_loss
+                # policy update
+                # n.b. policy update includes dQ/da
+                log_policy_target = min_q_new_actions
 
-            self.policy_optimizer.zero_grad()
-            policy_loss.backward()
-            self.policy_optimizer.step()
-            
+                policy_loss = (
+                        log_pi - log_policy_target
+                ).mean()
+
+                mean_reg_loss = self.policy_mean_reg_weight * (policy_mean**2).mean()
+                std_reg_loss = self.policy_std_reg_weight * (policy_log_std**2).mean()
+                pre_tanh_value = policy_outputs[-1]
+                pre_activation_reg_loss = self.policy_pre_activation_weight * (
+                    (pre_tanh_value**2).sum(dim=2).mean()
+                )
+                policy_reg_loss = mean_reg_loss + std_reg_loss + pre_activation_reg_loss
+                policy_loss = policy_loss + policy_reg_loss
+
+                self.policy_optimizer.zero_grad()
+                policy_loss.backward()
+                self.policy_optimizer.step()
+                
+        # Update task-specific persistent graph structures to match best-performing post-annealing graph structures
+        if self.persistent_task_graph_structures is not None:
+            for task_ind in np.unique(indices):
+                chosen_graph_ind = np.random.choice((indices == task_ind).nonzero()[0])
+                self.persistent_task_graph_structures[task_ind] = self.agent.graph_structure[chosen_graph_ind]
+                    
         # Update agent sim-anneal temperature to better match current goal acc rate
         self.agent.update_temp(self.sim_anneal_goal_acc_rate)
 
@@ -356,10 +386,12 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 policy_loss
             ))
             self.eval_statistics['Context Graph Encoder Loss'] = ptu.get_numpy(context_graph_loss)
+            '''
             self.eval_statistics['Context Graph Structures'] = {
                 task_ind: ptu.get_numpy(graph_structure[(indices == task_ind).nonzero()])
                 for task_ind in np.unique(indices)
             }
+            '''
             self.eval_statistics['SA Goal Accept Rate'] = self.sim_anneal_goal_acc_rate
             
             self.eval_statistics.update(create_stats_ordered_dict(
@@ -383,6 +415,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
                 ptu.get_numpy(policy_log_std),
             ))
 
+    #@profile
     def get_epoch_snapshot(self, epoch):
         # NOTE: overriding parent method which also optionally saves the env
         snapshot = OrderedDict(

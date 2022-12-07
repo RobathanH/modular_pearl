@@ -26,7 +26,7 @@ default_config = dict(
         sim_anneal_init_temp=1E-2,
         sim_anneal_init_goal_acc_rate=0.3,
         sim_anneal_final_goal_acc_rate=2E-3,
-        
+        persistent_task_graph_structures=False,
         
         meta_batch=16, # number of tasks to average the gradient across
         num_iterations=500, # number of data sampling / training iterates
@@ -57,6 +57,7 @@ default_config = dict(
         num_exp_traj_eval=1, # how many exploration trajs to collect before beginning posterior sampling at test time
         recurrent=False, # recurrent or permutation-invariant encoder
         dump_eval_paths=False, # whether to save evaluation trajectories
+        replay_buffer_size=1000000,
     ),
     util_params=dict(
         base_log_dir='output',
