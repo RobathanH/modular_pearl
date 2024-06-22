@@ -89,7 +89,7 @@ def gpu_enabled():
 
 # noinspection PyPep8Naming
 def FloatTensor(*args, **kwargs):
-    return torch.FloatTensor(*args, **kwargs).to(device)
+    return torch.FloatTensor(*args, **kwargs, device=device)
 
 
 def from_numpy(*args, **kwargs):
@@ -102,24 +102,32 @@ def get_numpy(tensor):
 
 
 def zeros(*sizes, **kwargs):
-    return torch.zeros(*sizes, **kwargs).to(device)
+    return torch.zeros(*sizes, **kwargs, device=device)
 
 
 def ones(*sizes, **kwargs):
-    return torch.ones(*sizes, **kwargs).to(device)
+    return torch.ones(*sizes, **kwargs, device=device)
 
 
 def randn(*args, **kwargs):
-    return torch.randn(*args, **kwargs).to(device)
+    return torch.randn(*args, **kwargs, device=device)
 
 
 def zeros_like(*args, **kwargs):
-    return torch.zeros_like(*args, **kwargs).to(device)
+    return torch.zeros_like(*args, **kwargs, device=device)
 
 
 def normal(*args, **kwargs):
-    return torch.normal(*args, **kwargs).to(device)
+    return torch.normal(*args, **kwargs, device=device)
 
 
 def arange(*args, **kwargs):
-    return torch.arange(*args, **kwargs).to(device)
+    return torch.arange(*args, **kwargs, device=device)
+
+
+def rand(*args, **kwargs):
+    return torch.rand(*args, **kwargs, device=device)
+
+
+def randint(*args, **kwargs):
+    return torch.randint(*args, **kwargs, device=device)

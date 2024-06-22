@@ -41,6 +41,7 @@ def experiment(variant):
         pre_gnn_fc_layers = variant['algo_params']['pre_gnn_fc_layers']
         gnn_layers = variant['algo_params']['gnn_layers']
         post_gnn_fc_layers = variant['algo_params']['post_gnn_fc_layers']
+        split_layer_into_nodes = variant['algo_params'].get('split_layer_into_nodes', False)
         
         latent_dim = variant['latent_size']
         net_size = variant['net_size']
@@ -80,34 +81,42 @@ def experiment(variant):
             input_size=obs_dim + action_dim + latent_dim,
             output_size=1,
             gnn_edge_types=gnn_edge_types,
+            gnn_node_count=gnn_node_count,
             gnn_layer_sizes=gnn_layer_sizes,
             pre_gnn_layer_sizes=pre_gnn_layer_sizes,
-            post_gnn_layer_sizes=post_gnn_layer_sizes
+            post_gnn_layer_sizes=post_gnn_layer_sizes,
+            split_layer_into_nodes=split_layer_into_nodes
         )
         qf2 = GraphModule(
             input_size=obs_dim + action_dim + latent_dim,
             output_size=1,
             gnn_edge_types=gnn_edge_types,
+            gnn_node_count=gnn_node_count,
             gnn_layer_sizes=gnn_layer_sizes,
             pre_gnn_layer_sizes=pre_gnn_layer_sizes,
-            post_gnn_layer_sizes=post_gnn_layer_sizes
+            post_gnn_layer_sizes=post_gnn_layer_sizes,
+            split_layer_into_nodes=split_layer_into_nodes
         )
         vf = GraphModule(
             input_size=obs_dim + latent_dim,
             output_size=1,
             gnn_edge_types=gnn_edge_types,
+            gnn_node_count=gnn_node_count,
             gnn_layer_sizes=gnn_layer_sizes,
             pre_gnn_layer_sizes=pre_gnn_layer_sizes,
-            post_gnn_layer_sizes=post_gnn_layer_sizes
+            post_gnn_layer_sizes=post_gnn_layer_sizes,
+            split_layer_into_nodes=split_layer_into_nodes
         )
         policy = Graph_TanhGaussianPolicy(
             obs_dim,
             latent_dim,
             action_dim,
             gnn_edge_types=gnn_edge_types,
+            gnn_node_count=gnn_node_count,
             gnn_layer_sizes=gnn_layer_sizes,
             pre_gnn_layer_sizes=pre_gnn_layer_sizes,
-            post_gnn_layer_sizes=post_gnn_layer_sizes
+            post_gnn_layer_sizes=post_gnn_layer_sizes,
+            split_layer_into_nodes=split_layer_into_nodes
         )
         agent = Graph_PEARLAgent(
             latent_dim,

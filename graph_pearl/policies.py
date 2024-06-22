@@ -41,9 +41,11 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
             latent_dim: int,
             action_dim: int,
             gnn_edge_types: int,
+            gnn_node_count: int,
             gnn_layer_sizes: List[int],
             pre_gnn_layer_sizes: List[int] = [],
-            post_gnn_layer_sizes: List[int] = []
+            post_gnn_layer_sizes: List[int] = [],
+            split_layer_into_nodes: bool = False
     ):
         self.save_init_params(locals())
         super().__init__()
@@ -52,17 +54,21 @@ class Graph_TanhGaussianPolicy(PyTorchModule, ExplorationPolicy):
         self.latent_dim = latent_dim
         self.action_dim = action_dim
         self.gnn_edge_types = gnn_edge_types
+        self.gnn_node_count = gnn_node_count
         self.gnn_layer_sizes = gnn_layer_sizes
         self.pre_gnn_layer_sizes = pre_gnn_layer_sizes
         self.post_gnn_layer_sizes = post_gnn_layer_sizes
+        self.split_layer_into_nodes = split_layer_into_nodes
         
         self.module = GraphModule(
             input_size=state_dim + latent_dim,
             output_size=2 * action_dim,
             gnn_edge_types=gnn_edge_types,
+            gnn_node_count=gnn_node_count,
             gnn_layer_sizes=gnn_layer_sizes,
             pre_gnn_layer_sizes=pre_gnn_layer_sizes,
-            post_gnn_layer_sizes=post_gnn_layer_sizes
+            post_gnn_layer_sizes=post_gnn_layer_sizes,
+            split_layer_into_nodes=split_layer_into_nodes
         )
 
     def get_action(self, state: torch.Tensor, latent: Optional[torch.Tensor], graph_structure: torch.Tensor, deterministic: bool = False):

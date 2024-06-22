@@ -74,7 +74,8 @@ class Graph_PEARLAgent(nn.Module):
         self.gnn_edge_types = kwargs['gnn_edge_types']
         self.sim_anneal_train_proposals = kwargs['sim_anneal_train_proposals']
         self.sim_anneal_eval_proposals = kwargs['sim_anneal_eval_proposals']
-        self.sim_anneal_temp = kwargs['sim_anneal_init_temp']
+        self.sim_anneal_temp = self.sim_anneal_init_temp = kwargs['sim_anneal_init_temp']
+        self.sim_anneal_eval_temp_decay = kwargs.get('sim_anneal_eval_temp_decay', 0.95)
 
         self.context_vector_encoder = context_vector_encoder # (context -> z_means, z_vars)
         self.context_graph_encoder = context_graph_encoder # (context -> inner_edge_probs (innner_node_count, gnn_node_count, gnn_edge_types))
@@ -118,6 +119,7 @@ class Graph_PEARLAgent(nn.Module):
         self.z_means = mu
         self.z_vars = var
         self.graph_structure_probs = ptu.ones(num_tasks, self.gnn_node_count, self.gnn_node_count, self.gnn_edge_types) / (self.gnn_edge_types)
+        self.latest_used_context = None # Save the context tuples which correspond to the current graph structure probs, allows resampling and reannealing graph
         
         # sample a new z from the prior
         self.sample_z()
@@ -215,11 +217,12 @@ class Graph_PEARLAgent(nn.Module):
         graph_edge_prob_logits = self.context_graph_encoder(packed_context).view(*packed_context.shape[:2], self.gnn_node_count, self.gnn_node_count, self.gnn_edge_types)
         graph_edge_prob_logits = graph_edge_prob_logits.sum(dim=1)
         self.graph_structure_probs = F.softmax(graph_edge_prob_logits, dim=-1)
+        self.latest_used_context = context
         
         if sample_graph:
             self.sample_graph()
         if anneal_graph:
-            self.anneal_graph_structure(context, train_annealing=train_annealing)
+            self.anneal_graph_structure(train_annealing)
 
     #@profile
     def sample_z(self):
@@ -283,51 +286,59 @@ class Graph_PEARLAgent(nn.Module):
                
     @torch.no_grad() 
     #@profile
-    def anneal_graph_structure(self, context, train_annealing = False):
-        num_tasks = self.z.size(0)
+    def anneal_graph_structure(self, train_annealing = False):
+        # Use the context used to compute self.graph_structure_probs for annealing
+        context = self.latest_used_context
         
-        # TODO: See if there is efficiency increase from only changing the edge dict in each annealing step,
-        # rather than reconstructing from self.graph_structure
+        # No annealing possible without context, we just sample from prior
+        if context is None:
+            return
+        
+        num_tasks = self.z.size(0)
         
         curr_structure_loss = self.graph_structure_loss(context, self.graph_structure)
         all_structure_losses = [curr_structure_loss]
         all_proposed_structure_losses = []
-        #print(f"Orig Structure Loss: {curr_structure_loss.tolist()}")
+        
         if train_annealing:
             proposal_count = self.sim_anneal_train_proposals
+            temp = self.sim_anneal_temp
         else:
             proposal_count = self.sim_anneal_eval_proposals
+            temp = self.sim_anneal_init_temp
+            
         for step in trange(proposal_count, desc="annealing", leave=False, delay=0.5):
-            node_i = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
-            node_j = ptu.from_numpy(np.random.choice(self.gnn_node_count, size=num_tasks)).long()
+            node_i = ptu.randint(0, self.gnn_node_count, size=(num_tasks,))
+            node_j = ptu.randint(0, self.gnn_node_count, size=(num_tasks,))
             
             # Get probabilities for each chosen node-pair from graph structure encoder,
-            proposal_edge_type_probs = self.graph_structure_probs[torch.arange(num_tasks), node_i, node_j].detach().clone()
+            proposal_edge_type_probs = self.graph_structure_probs[ptu.arange(num_tasks), node_i, node_j].detach().clone()
             proposal_edge_type_probs += 1e-5 # to avoid any zero-weight errors in multinomial if all prob is at current edge
 
             # then zero-out probability for current edge type (so proposal is definitely different from current)
-            curr_edge_types = self.graph_structure[torch.arange(num_tasks), node_i, node_j]
-            proposal_edge_type_probs[torch.arange(num_tasks), curr_edge_types] = 0
+            curr_edge_types = self.graph_structure[ptu.arange(num_tasks), node_i, node_j]
+            proposal_edge_type_probs[ptu.arange(num_tasks), curr_edge_types] = 0
 
             # Sample proposal edge types from graph structure encoder edge-type distribution
             proposal_edge_types = torch.multinomial(proposal_edge_type_probs, num_samples=1)[:, 0]
             
             # Apply proposed changes for each task subgraph
             proposed_structure = self.graph_structure.clone()
-            proposed_structure[torch.arange(num_tasks), node_i, node_j] = proposal_edge_types
+            proposed_structure[ptu.arange(num_tasks), node_i, node_j] = proposal_edge_types
             proposed_structure_loss = self.graph_structure_loss(context, proposed_structure)
             #print(node_i.tolist(), node_j.tolist(), edge_type.tolist())
             #print(f"orig: {self.graph_structure}")
             #print(f"proposed: {proposed_structure}")
             
             # Accept or reject change for each task
-            prob_accept = ((curr_structure_loss - proposed_structure_loss) / self.sim_anneal_temp).exp()
-            accept = (ptu.from_numpy(np.random.uniform(size=prob_accept.shape)) <= prob_accept)
+            prob_accept = ((curr_structure_loss - proposed_structure_loss) / temp).exp()
+            accept = (ptu.rand(size=prob_accept.shape) <= prob_accept)
             accepted_task_inds = accept.nonzero()
             
-            worse = (proposed_structure_loss > curr_structure_loss)
-            self.structure_worse_proposals_count += worse.sum().item()
-            self.structure_worse_proposals_accepted += (worse & accept).sum().item()
+            if train_annealing:
+                worse = (proposed_structure_loss > curr_structure_loss)
+                self.structure_worse_proposals_count += worse.sum().item()
+                self.structure_worse_proposals_accepted += (worse & accept).sum().item()
             
             #print(prob_accept.tolist())
             #print(accept.tolist())
@@ -340,6 +351,9 @@ class Graph_PEARLAgent(nn.Module):
                 
             all_structure_losses.append(curr_structure_loss)
             all_proposed_structure_losses.append(proposed_structure_loss)
+            
+            if not train_annealing:
+                temp *= self.sim_anneal_eval_temp_decay
                 
         self.structure_loss_std += torch.std(torch.vstack(all_proposed_structure_losses), dim=0).tolist()
         #print(f"Final Structure Loss: {curr_structure_loss.tolist()}")
@@ -399,7 +413,10 @@ class Graph_PEARLAgent(nn.Module):
         eval_statistics['Z variance eval'] = z_sig
 
         eval_statistics['SA Temp'] = self.sim_anneal_temp
-        eval_statistics['SA Accept Rate'] = self.structure_worse_proposals_accepted / self.structure_worse_proposals_count
+        if self.structure_worse_proposals_count != 0:
+            eval_statistics['SA Accept Rate'] = self.structure_worse_proposals_accepted / self.structure_worse_proposals_count
+        else:
+            eval_statistics['SA Accept Rate'] = np.nan
         eval_statistics['SA Structure Loss Std'] = sum(self.structure_loss_std) / len(self.structure_loss_std)
 
     @property

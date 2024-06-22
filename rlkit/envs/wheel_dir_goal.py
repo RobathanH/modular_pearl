@@ -20,7 +20,7 @@ class WheelDirGoalEnv(MujocoEnv, utils.EzPickle):
         "render_fps": 20,
     }
     
-    def __init__(self, task={}, n_tasks=4, forward_backward=False, unify_rewards=False, randomize_tasks=True, **kwargs):
+    def __init__(self, task={}, n_tasks=4, forward_backward=False, reward_variant=0, randomize_tasks=True, **kwargs):
         model_file = os.path.join(
             os.path.dirname(os.path.realpath(__file__)),
             "assets", "wheeled.xml"
@@ -42,7 +42,7 @@ class WheelDirGoalEnv(MujocoEnv, utils.EzPickle):
         # Set up tasks
         assert randomize_tasks, "Non-random tasks are not implemented"
         self.forward_backward = forward_backward
-        self.unify_rewards = unify_rewards
+        self.reward_variant = reward_variant
         
         self.tasks, self.task_types = self.sample_tasks(n_tasks)
         self.task_idx_to_type = {idx: task_type for task_type, indices in self.task_types.items() for idx in indices}
@@ -67,20 +67,44 @@ class WheelDirGoalEnv(MujocoEnv, utils.EzPickle):
         
         if self.render_on:
             self.render_frames.append(self.render())
-        
-        if 'dir' in self._task:
-            goal_dir = np.array([np.cos(self._task['dir']), np.sin(self._task['dir'])])
-            xvel = (x_after - x_before) / self.dt
-            main_reward = np.dot(xvel, goal_dir)
-        elif 'goal' in self._task:
-            goal_pos = self._task['goal']
-            if self.unify_rewards:
+            
+        if self.reward_variant == 0:
+            if 'dir' in self._task:
+                goal_dir = np.array([np.cos(self._task['dir']), np.sin(self._task['dir'])])
+                xvel = (x_after - x_before) / self.dt
+                main_reward = np.dot(xvel, goal_dir)
+            elif 'goal' in self._task:
+                goal_pos = self._task['goal']
+                main_reward = -np.sum(np.abs(x_after - goal_pos))
+            else:
+                raise NotImplementedError
+            
+        elif self.reward_variant == 1:
+            if 'dir' in self._task:
+                goal_dir = np.array([np.cos(self._task['dir']), np.sin(self._task['dir'])])
+                xvel = (x_after - x_before) / self.dt
+                main_reward = np.dot(xvel, goal_dir)
+            elif 'goal' in self._task:
+                goal_pos = self._task['goal']
                 prev_goal_dist = np.linalg.norm(goal_pos - x_before)
                 curr_goal_dist = np.linalg.norm(goal_pos - x_after)
                 vel_to_goal = (prev_goal_dist - curr_goal_dist) / self.dt
                 main_reward = vel_to_goal
             else:
+                raise NotImplementedError
+            
+        elif self.reward_variant == 2:
+            if 'dir' in self._task:
+                goal_dir = np.array([np.cos(self._task['dir']), np.sin(self._task['dir'])])
+                xvel = (x_after - x_before) / self.dt
+                goal_vel = np.dot(xvel, goal_dir)
+                main_reward = -np.abs(goal_vel - 10)
+            elif 'goal' in self._task:
+                goal_pos = self._task['goal']
                 main_reward = -np.sum(np.abs(x_after - goal_pos))
+            else:
+                raise NotImplementedError
+            
         else:
             raise NotImplementedError
         

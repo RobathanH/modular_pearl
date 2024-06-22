@@ -451,7 +451,7 @@ class MetaRLAlgorithm(metaclass=abc.ABCMeta):
         eval_util.dprint('evaluating on {} train tasks'.format(len(indices)))
         ### eval train tasks with posterior sampled from the training replay buffer
         train_returns = []
-        for idx in tqdm(indices, desc="train rollouts (offline context)", leave=False, delay=0.5):
+        for idx in tqdm(indices, desc="train rollouts (sampled context)", leave=False, delay=0.5):
             self.task_idx = idx
             self.env.reset_task(idx)
             paths = []

@@ -30,12 +30,14 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
             pre_gnn_fc_layers=0,
             gnn_layers=3,
             post_gnn_fc_layers=0,
+            split_layer_into_nodes=False,
             context_graph_lr=1e-3,
             bouncegrad_iterations=10,
             graph_kl_lambda=0.1,
             sim_anneal_train_proposals=10,
             sim_anneal_eval_proposals=1000,
             sim_anneal_init_temp=1E-4,
+            sim_anneal_eval_temp_decay=0.95,
             sim_anneal_init_goal_acc_rate=0.3,
             sim_anneal_final_goal_acc_rate=2E-3,
             persistent_task_graph_structures=False,
@@ -79,7 +81,7 @@ class Graph_PEARLSoftActorCritic(MetaRLAlgorithm):
         self.sim_anneal_final_goal_acc_rate = sim_anneal_final_goal_acc_rate
         self.sim_anneal_goal_acc_rate_decay_factor = np.exp(np.log(sim_anneal_final_goal_acc_rate / sim_anneal_init_goal_acc_rate) / (kwargs['num_iterations'] * kwargs['num_train_steps_per_itr']))
         if persistent_task_graph_structures:
-            self.persistent_task_graph_structures = ptu.zeros(len(train_tasks), gnn_node_count, gnn_node_count, dtype=torch.long)
+            self.persistent_task_graph_structures = ptu.randint(0, gnn_edge_types, size=(len(train_tasks), gnn_node_count, gnn_node_count))
         else:
             self.persistent_task_graph_structures = None
 

@@ -1,19 +1,22 @@
 {
     "graph_pearl": true,
     "env_name": "wheel-dir-goal",
-    "n_train_tasks": 150,
-    "n_eval_tasks": 30,
+    "n_train_tasks": 100,
+    "n_eval_tasks": 10,
     "env_params": {
-        "n_tasks": 180,
+        "n_tasks": 110,
         "reward_variant": 1
     },
     "latent_size": 5,
     "algo_params": {
-        "gnn_node_count": 2,
+        "gnn_node_count": 4,
         "gnn_edge_types": 2,
         "pre_gnn_fc_layers": 1,
         "gnn_layers": 2,
         "post_gnn_fc_layers": 0,
+        "split_layer_into_nodes": false,
+
+
         "bouncegrad_iterations": 1,
         "graph_kl_lambda": 1,
         "persistent_task_graph_structures": true,
@@ -35,7 +38,7 @@
         "num_steps_prior": 400,
         "num_steps_posterior": 0,
         "num_extra_rl_steps_posterior": 600,
-        "num_train_steps_per_itr": 400,
+        "num_train_steps_per_itr": 1000,
         "num_evals": 1,
         "num_steps_per_eval": 1000,
         "max_path_length": 200,

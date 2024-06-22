@@ -5,7 +5,7 @@
     "n_eval_tasks": 30,
     "env_params": {
         "n_tasks": 180,
-        "unify_rewards": true
+        "reward_variant": 1
     },
     "latent_size": 5,
     "algo_params": {
